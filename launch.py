@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 from logging import info
 from distutils.util import strtobool
 from multiprocessing import Process
@@ -10,7 +11,7 @@ from typing import List
 import generator
 import train
 from pydreamer.tools import (configure_logging, mlflow_log_params,
-                             mlflow_init, print_once, read_yamls)
+                             mlflow_init, wandb_init, print_once, read_yamls)
 
 
 def launch():
@@ -44,9 +45,15 @@ def launch():
 
     worker_type, worker_index = get_worker_info()
     is_main_worker = worker_type is None or worker_type == 'learner'
+    if is_main_worker and not os.environ.get('MLFLOW_RUN_NAME'):
+        env_id = getattr(conf, 'env_id', '') or 'unknown'
+        env_short = env_id.split(':')[-1].replace('/', '_')  # strip gym namespace
+        os.environ['MLFLOW_RUN_NAME'] = f"{env_short}_{datetime.now().strftime('%m%d_%H%M')}"
     mlrun = mlflow_init(wait_for_resume=not is_main_worker)
     artifact_uri = mlrun.info.artifact_uri
     mlflow_log_params(vars(conf))
+    if is_main_worker:
+        wandb_init(conf)
 
     # Launch train+eval generators
 

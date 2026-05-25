@@ -150,8 +150,10 @@ class Dreamer(nn.Module):
         # Note features_dream includes the starting "real" features at features_dream[0]
         features_dream, actions_dream, rewards_dream, terminals_dream = \
             self.dream(in_state_dream, H, self.ac.actor_grad == 'dynamics')  # (H+1,TBI,D)
+        # dynamics gradients need features un-detached so grad flows actor→world model→actor
+        features_ac = features_dream if self.ac.actor_grad == 'dynamics' else features_dream.detach()
         (loss_actor, loss_critic), metrics_ac, tensors_ac = \
-            self.ac.training_step(features_dream.detach(),
+            self.ac.training_step(features_ac,
                                   actions_dream.detach(),
                                   rewards_dream.mean.detach(),
                                   terminals_dream.mean.detach())

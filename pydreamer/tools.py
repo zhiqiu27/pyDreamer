@@ -111,6 +111,22 @@ def mlflow_log_params(params: dict):
             exception('Error in mlflow.log_params (it is ok if params changed).')
 
 
+def wandb_init(conf=None):
+    try:
+        import wandb
+        if wandb.run is not None:
+            return
+        run_id = os.environ.get('WANDB_RUN_ID')
+        project = os.environ.get('WANDB_PROJECT', 'pydreamer')
+        if run_id:
+            wandb.init(id=run_id, resume='allow', project=project)
+        else:
+            run = wandb.init(project=project, config=vars(conf) if conf else None)
+            os.environ['WANDB_RUN_ID'] = run.id
+    except ImportError:
+        pass
+
+
 def mlflow_log_metrics(metrics: dict, step: int):
     import mlflow
     while True:
@@ -120,6 +136,15 @@ def mlflow_log_metrics(metrics: dict, step: int):
         except:
             exception('Error logging metrics - will retry.')
             time.sleep(10)
+    try:
+        import wandb
+        if wandb.run is not None:
+            clean = {k: v for k, v in metrics.items()
+                     if not k.startswith('_') and np.isfinite(float(v))}
+            if clean:
+                wandb.log(clean, step=step)
+    except Exception:
+        pass
 
 
 def mlflow_log_npz(data: dict, name, subdir=None, verbose=False, repository: ArtifactRepository = None):

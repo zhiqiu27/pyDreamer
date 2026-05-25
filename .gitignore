@@ -4,6 +4,8 @@ data/*
 log/
 logs/
 mlruns/
+wandb/
+mlflow.db
 
 _*.*
 .*

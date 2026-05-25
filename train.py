@@ -22,9 +22,10 @@ from pydreamer.tools import *
 
 
 def run(conf):
-    
+
     configure_logging(prefix='[TRAIN]')
     mlrun = mlflow_init()
+    wandb_init()
     artifact_uri = mlrun.info.artifact_uri
 
     torch.distributions.Distribution.set_default_validate_args(False)
@@ -137,7 +138,7 @@ def run(conf):
     data_iter = iter(DataLoader(WorkerInfoPreprocess(preprocess(data)),
                                 batch_size=None,
                                 num_workers=conf.data_workers,
-                                prefetch_factor=20 if conf.data_workers else 2,  # GCS download has to be shorter than this many batches (e.g. 1sec < 20*300ms)
+                                prefetch_factor=20 if conf.data_workers else None,  # GCS download has to be shorter than this many batches (e.g. 1sec < 20*300ms)
                                 pin_memory=True))
 
     scaler = GradScaler(enabled=conf.amp)

@@ -48,6 +48,7 @@ def main(env_id='MiniGrid-MazeS11N-v0',
 
     configure_logging(prefix=f'[GEN {worker_id}]', info_color=LogColorFormatter.GREEN)
     mlrun = mlflow_init()
+    wandb_init()
     info(f'Generator {worker_id} started:'
          f' env={env_id}'
          f', n_steps={num_steps:,}'
