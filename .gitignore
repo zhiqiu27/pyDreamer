@@ -3,6 +3,7 @@ __pycache__/
 data/*
 log/
 logs/
+*.log
 mlruns/
 wandb/
 mlflow.db

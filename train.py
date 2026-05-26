@@ -184,8 +184,9 @@ def run(conf):
 
                     for opt in optimizers:
                         opt.zero_grad()
-                    for loss in losses:
-                        scaler.scale(loss).backward()  # type: ignore
+                    for i, loss in enumerate(losses):
+                        retain = (i < len(losses) - 1)
+                        scaler.scale(loss).backward(retain_graph=retain)  # type: ignore
 
                 # Grad step
 

@@ -118,10 +118,14 @@ def wandb_init(conf=None):
             return
         run_id = os.environ.get('WANDB_RUN_ID')
         project = os.environ.get('WANDB_PROJECT', 'pydreamer')
+        # Use MLflow run name or custom WANDB_NAME for the run name
+        run_name = os.environ.get('WANDB_NAME') or os.environ.get('MLFLOW_RUN_NAME')
+        if run_name:
+            print_once('wandb_run_name', f'Wandb run name: {run_name}')
         if run_id:
-            wandb.init(id=run_id, resume='allow', project=project)
+            wandb.init(id=run_id, resume='allow', project=project, name=run_name)
         else:
-            run = wandb.init(project=project, config=vars(conf) if conf else None)
+            run = wandb.init(project=project, config=vars(conf) if conf else None, name=run_name)
             os.environ['WANDB_RUN_ID'] = run.id
     except ImportError:
         pass
