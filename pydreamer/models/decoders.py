@@ -360,3 +360,66 @@ class DenseCategoricalSupportDecoder(nn.Module):
         assert len(loss_tb.shape) == 2
         assert len(decoded.shape) == 2
         return loss_tbi, loss_tb, decoded
+
+
+class InverseDynamicsHead(nn.Module):
+    """Inverse dynamics head: predict the action executed between two consecutive
+    *encoder embeddings* e_t and e_{t+1}.
+
+    Design constraints (DreamerV2 inverse-dynamics auxiliary loss):
+      - Input is the raw encoder embedding e_t = encoder(o_t), NOT the RSSM latent.
+        Using the RSSM state would leak the action (h_{t+1}=f(h_t,z_t,a_t)) and make
+        this head degenerate.
+      - Gradients flow back into the encoder (embed is not detached), so the auxiliary
+        loss shapes the encoder representation against visual distractors.
+      - Time alignment follows this codebase's convention `action[t]` = action that
+        led to obs[t] (see data.py: `action[i] -> obs[i] -> action_next[i] -> obs[i+1]`).
+        So the action between e_t and e_{t+1} is `action[t+1]`, i.e. target = action[1:].
+    """
+
+    def __init__(self, embed_dim, action_dim, action_dist='onehot',
+                 hidden_dim=400, hidden_layers=2, layer_norm=True, activation=nn.ELU):
+        super().__init__()
+        self.action_dist = action_dist
+        self.action_dim = action_dim
+        norm = nn.LayerNorm if layer_norm else NoNorm
+        # Build the MLP manually (not common.MLP) to avoid its out_dim==1 Flatten
+        # special-case, which would break shapes for 1-D continuous actions (e.g. DMC cartpole).
+        layers = []
+        dim = 2 * embed_dim
+        for _ in range(hidden_layers):
+            layers += [nn.Linear(dim, hidden_dim), norm(hidden_dim, eps=1e-3), activation()]
+            dim = hidden_dim
+        layers += [nn.Linear(dim, action_dim)]
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, embed: Tensor) -> Tensor:
+        # embed: (T,B,E) => predict action for each adjacent pair (T-1,B,A)
+        pair = torch.cat([embed[:-1], embed[1:]], dim=-1)  # (T-1,B,2E)
+        return self.model(pair)
+
+    def training_step(self, embed: Tensor, action: Tensor, reset: Tensor) -> Tuple[Tensor, Tensor]:
+        # embed: (T,B,E)  action: (T,B,A)  reset: (T,B)
+        assert len(embed.shape) == 3, f'Expected encoder embed (T,B,E), got {embed.shape}'
+        T = embed.shape[0]
+        assert action.shape[0] == T
+
+        pred = self.forward(embed)  # (T-1,B,A), aligned to predict action[1:]
+        target = action[1:]         # (T-1,B,A): action executed between e_t and e_{t+1}
+
+        # Mask transitions crossing an episode boundary: reset[t+1]=True means o_{t+1}
+        # starts a new episode, so the (e_t, e_{t+1}) pair (and action[t+1]) is invalid.
+        mask = (reset[1:] <= 0).to(pred.dtype)  # (T-1,B)
+
+        if self.action_dist == 'onehot':
+            logits = pred.reshape(-1, self.action_dim)
+            tgt = target.reshape(-1, self.action_dim).argmax(dim=-1)
+            loss_step = F.cross_entropy(logits, tgt, reduction='none').reshape(target.shape[:-1])  # (T-1,B)
+        else:
+            # Mean over action dims (not sum) so inverse_head_weight is invariant to
+            # action_dim across envs. For A=1 (e.g. cartpole) mean==sum, so no change there.
+            loss_step = torch.square(pred - target).mean(dim=-1)  # (T-1,B), L2 per step
+
+        denom = mask.sum().clamp(min=1.0)
+        loss = (loss_step * mask).sum() / denom
+        return loss, loss_step.detach()

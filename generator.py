@@ -69,7 +69,7 @@ def main(env_id='MiniGrid-MazeS11N-v0',
 
     # Env
 
-    env = create_env(env_id, env_no_terminal, env_time_limit, env_action_repeat, worker_id)
+    env = create_env(env_id, env_no_terminal, env_time_limit, env_action_repeat, worker_id, conf=model_conf)
 
     # Policy
 
@@ -328,7 +328,7 @@ class NetworkPolicy:
         metrics.update(action_prob=action_distr.log_prob(action).exp().mean().item(),
                        policy_entropy=action_distr.entropy().mean().item())
 
-        action = action.squeeze()  # (1,1,A) => A
+        action = action[0, 0]  # (1,1,A) => (A,)
         return action.numpy(), metrics
 
 

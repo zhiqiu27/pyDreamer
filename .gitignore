@@ -4,6 +4,7 @@ data/*
 log/
 logs/
 *.log
+*.png
 mlruns/
 wandb/
 mlflow.db

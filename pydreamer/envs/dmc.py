@@ -33,7 +33,7 @@ class DMC(gym.Env):
                 locom_rodent_two_touch=1,
             ).get(name, 0)
         self._camera = camera
-        self._ignored_keys = []
+        self._ignored_keys = ['pixels']  # pixels added by distracting_control wrapper, not needed
         for key, value in self._env.observation_spec().items():
             if value.shape == (0,):
                 print(f"Ignoring empty observation key '{key}'.")
@@ -91,3 +91,67 @@ class DMC(gym.Env):
         if kwargs.get('mode', 'rgb_array') != 'rgb_array':
             raise ValueError("Only render mode 'rgb_array' is supported.")
         return self._env.physics.render(*self._size, camera_id=self._camera)  # type: ignore
+
+
+class DistractingDMC(DMC):
+
+    def __init__(self, name, action_repeat=1, size=(64, 64),
+                 difficulty='easy', dynamic=False,
+                 background_dataset_path='/home/csy24/DAVIS/JPEGImages/480p/',
+                 custom_kwargs=None):
+        from distracting_control import suite as distracting_suite
+        from distracting_control import suite_utils
+        domain, task = name.split('_', 1)
+        if domain == 'cup':
+            domain = 'ball_in_cup'
+
+        if difficulty == 'custom':
+            # Fine-grained control: bypass the difficulty preset and build the three
+            # distraction kwargs ourselves from config (see config/distract.yaml).
+            ck = custom_kwargs or {}
+            scale = ck.get('scale', 0.1)
+            num_videos = ck.get('num_videos', 4) or None  # 0/None => use all videos
+            background_kwargs = camera_kwargs = color_kwargs = None
+            if ck.get('background', True):
+                background_kwargs = suite_utils.get_background_kwargs(
+                    domain, num_videos, dynamic,
+                    dataset_path=background_dataset_path,
+                    video_alpha=ck.get('video_alpha', 1.0))
+                background_kwargs['ground_plane_alpha'] = ck.get('ground_alpha', 1.0)
+            if ck.get('camera', True):
+                camera_kwargs = suite_utils.get_camera_kwargs(domain, scale, dynamic)
+            if ck.get('color', True):
+                color_kwargs = suite_utils.get_color_kwargs(scale, dynamic)
+            self._env = distracting_suite.load(
+                domain_name=domain,
+                task_name=task,
+                difficulty=None,  # disable preset; use explicit kwargs below
+                dynamic=dynamic,
+                background_dataset_path=background_dataset_path,
+                background_kwargs=background_kwargs,
+                camera_kwargs=camera_kwargs,
+                color_kwargs=color_kwargs,
+                pixels_only=False,
+            )
+        else:
+            self._env = distracting_suite.load(
+                domain_name=domain,
+                task_name=task,
+                difficulty=difficulty,
+                dynamic=dynamic,
+                background_dataset_path=background_dataset_path,
+                pixels_only=False,
+            )
+        self._action_repeat = action_repeat
+        self._size = size
+        self._camera = dict(
+            quadruped_walk=2,
+            quadruped_run=2,
+            quadruped_escape=2,
+            quadruped_fetch=2,
+        ).get(name, 0)
+        self._ignored_keys = ['pixels']  # distracting_control adds raw 240x320 pixels, use our own render
+        for key, value in self._env.observation_spec().items():
+            if value.shape == (0,):
+                print(f"Ignoring empty observation key '{key}'.")
+                self._ignored_keys.append(key)

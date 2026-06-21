@@ -1,0 +1,21 @@
+# Custom visual distraction params for DistractingDMC.
+#
+# Usage:
+#   1) Add `distract` to --configs, e.g.  --configs defaults dmc distract
+#   2) Set difficulty to `custom` in env_id, e.g.
+#        --env_id DistractingDMC-custom-static-cartpole_balance
+#        --env_id DistractingDMC-custom-dynamic-cartpole_balance
+#
+# Notes:
+#   - If env_id uses easy/medium/hard, these params are ignored (use the preset).
+#   - Only when difficulty=custom do the params below take effect.
+#   - Reference presets: scale  easy=0.1 / medium=0.2 / hard=0.3
+#                        num_videos  easy=4 / medium=8 / hard=all
+distract:
+  distract_scale: 0.1          # camera + color distraction strength (0~1, larger = stronger)
+  distract_num_videos: 4       # number of background videos (0 = use all videos in dataset)
+  distract_video_alpha: 1.0    # background video opacity (1.0 = fully replace background, 0 = none)
+  distract_ground_alpha: 1.0   # ground plane opacity
+  distract_background: True    # enable background video distraction
+  distract_camera: False        # enable camera shake distraction
+  distract_color: False         # enable color distraction

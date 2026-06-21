@@ -442,8 +442,9 @@ def prepare_batch_npz(data: Dict[str, Tensor], take_b=999):
             pass
 
         elif len(x.shape) == 5:  # 3D tensor - image
-            assert x.dtype == np.float32 and (key.startswith('image') or key.startswith('map')), \
-                f'Unexpected 3D tensor: {key}: {x.shape}, {x.dtype}'
+            if not (x.dtype == np.float32 and (key.startswith('image') or key.startswith('map'))):
+                return None  # skip unexpected 3D tensors (e.g. 'pixels' from distracting_control)
+
 
             if x.shape[-1] == x.shape[-2]:  # (T,B,C,W,W)
                 x = x.transpose(0, 1, 3, 4, 2)  # => (T,B,W,W,C)
@@ -464,7 +465,7 @@ def prepare_batch_npz(data: Dict[str, Tensor], take_b=999):
         x = x.swapaxes(0, 1)  # type: ignore  # (T,B,*) => (B,T,*)
         return x
 
-    return {k: unpreprocess(k, v) for k, v in data.items()}
+    return {k: v for k, v in ((k, unpreprocess(k, v)) for k, v in data.items()) if v is not None}
 
 
 def get_profiler(conf):

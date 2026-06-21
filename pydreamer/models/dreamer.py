@@ -221,7 +221,7 @@ class Dreamer(nn.Module):
         # Short representation
         s = []
         s.append(f'Model: {param_count(self)} parameters')
-        for submodel in (self.wm.encoder, self.wm.decoder, self.wm.core, self.ac, self.probe_model):
+        for submodel in (self.wm.encoder, self.wm.decoder, self.wm.core, self.wm.inverse_head, self.ac, self.probe_model):
             if submodel is not None:
                 s.append(f'  {type(submodel).__name__:<15}: {param_count(submodel)} parameters')
         return '\n'.join(s)
@@ -263,6 +263,21 @@ class WorldModel(nn.Module):
                              gru_layers=conf.gru_layers,
                              gru_type=conf.gru_type,
                              layer_norm=conf.layer_norm)
+
+        # Inverse dynamics head (auxiliary representation loss on encoder embedding)
+
+        self.use_inverse_head = getattr(conf, 'use_inverse_head', False)
+        if self.use_inverse_head:
+            self.inverse_head = InverseDynamicsHead(
+                embed_dim=self.encoder.out_dim,
+                action_dim=conf.action_dim,
+                action_dist=conf.actor_dist,
+                hidden_layers=conf.reward_decoder_layers,
+                layer_norm=conf.layer_norm)
+            self.inverse_head_weight = getattr(conf, 'inverse_head_weight', 1.0)
+        else:
+            self.inverse_head = None
+            self.inverse_head_weight = 0.0
 
         # Auxiliary critic
 
@@ -359,12 +374,20 @@ class WorldModel(nn.Module):
         else:
             loss_critic_aux = 0.0
 
+        # Inverse dynamics loss (on encoder embedding; gradients flow into encoder)
+
+        if self.inverse_head is not None:
+            loss_inverse, loss_inverse_step = self.inverse_head.training_step(embed, obs['action'], obs['reset'])
+            metrics.update(loss_inverse=loss_inverse.detach())
+        else:
+            loss_inverse = 0.0
+
         # Total loss
 
         assert loss_kl.shape == loss_reconstr.shape
         loss_model_tbi = self.kl_weight * loss_kl + loss_reconstr
         loss_model = -logavgexp(-loss_model_tbi, dim=2)
-        loss = loss_model.mean() + self.aux_critic_weight * loss_critic_aux
+        loss = loss_model.mean() + self.aux_critic_weight * loss_critic_aux + self.inverse_head_weight * loss_inverse
 
         # Metrics
 
