@@ -86,6 +86,7 @@ class WorldModelProbe(nn.Module):
                       do_open_loop=False,
                       do_image_pred=False,
                       do_dream_tensors=False,
+                      encoder_warmup=False,  # ignored: baselines have no spatial-attention warm-up
                       ):
         # World model
 
@@ -271,7 +272,7 @@ class VAEWorldModel(nn.Module):
                       ):
         # Encode-sample-decode
 
-        embed = self.encoder(obs)
+        embed, _ = self.encoder(obs)
         post = self.post_mlp(embed)
         post = insert_dim(post, 2, iwae_samples)
         post_distr = diag_normal(post)
@@ -342,7 +343,7 @@ class GRUEncoderOnly(nn.Module):
 
         # Encoder
 
-        embed = self.encoder(obs)
+        embed, _ = self.encoder(obs)
         embed = self.squeeze(embed)  # squeeze to smaller dimension so embedding input doesn't dominate action input
         action_next = obs['action_next']
         embed_act = torch.cat([embed, action_next], -1)

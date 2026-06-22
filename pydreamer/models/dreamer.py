@@ -118,6 +118,7 @@ class Dreamer(nn.Module):
                       do_open_loop=False,
                       do_image_pred=False,
                       do_dream_tensors=False,
+                      encoder_warmup=False,
                       ):
         assert 'action' in obs, '`action` required in observation'
         assert 'reward' in obs, '`reward` required in observation'
@@ -127,6 +128,15 @@ class Dreamer(nn.Module):
         imag_horizon = int(imag_horizon or self.imag_horizon)
         T, B = obs['action'].shape[:2]
         I, H = iwae_samples, imag_horizon
+
+        # Phase 1 encoder warm-up: train only encoder + attention head (inverse-dynamics loss),
+        # skipping probe / actor-critic. Returns a single-element loss tuple, so only the world
+        # model optimizer gets non-zero gradients (encoder + inverse head).
+
+        if encoder_warmup and self.wm.inverse_head is not None:
+            loss_model, _, _, out_state, metrics, _ = \
+                self.wm.training_step(obs, in_state, iwae_samples=iwae_samples, encoder_only=True)
+            return (loss_model,), out_state, metrics, {}, {}
 
         # World model
 
@@ -303,6 +313,17 @@ class WorldModel(nn.Module):
     def init_state(self, batch_size: int) -> Tuple[Any, Any]:
         return self.core.init_state(batch_size)
 
+    def _image_mask(self, mask_feat: Tensor, image: Tensor) -> Tensor:
+        # mask_feat: (T,B,1,h,w) low-res spatial attention in (0,1)
+        # image:     (T,B,C,H,W)
+        # returns:   (T,B,1,H,W) bilinearly upsampled to image resolution, detached.
+        T, B = mask_feat.shape[:2]
+        h, w = mask_feat.shape[-2:]
+        H, W = image.shape[-2:]
+        m = mask_feat.reshape(T * B, 1, h, w)
+        m = F.interpolate(m, size=(H, W), mode='bilinear', align_corners=False)
+        return m.reshape(T, B, 1, H, W).detach()
+
     def forward(self,
                 obs: Dict[str, Tensor],
                 in_state: Any
@@ -317,11 +338,38 @@ class WorldModel(nn.Module):
                       iwae_samples: int = 1,
                       do_open_loop=False,
                       do_image_pred=False,
-                      forward_only=False
+                      forward_only=False,
+                      encoder_only=False
                       ):
         # Encoder
 
-        embed = self.encoder(obs)
+        embed, mask_feat = self.encoder(obs)  # embed (T,B,E); mask_feat (T,B,1,h,w) or None
+
+        # Phase 1 warm-up: train only the encoder + spatial-attention head via the
+        # inverse-dynamics loss. The RSSM is advanced under no_grad purely to produce a
+        # valid out_state for keep_state; decoder / KL / actor-critic are all skipped.
+
+        if encoder_only:
+            assert self.inverse_head is not None, 'encoder_only warm-up requires use_inverse_head'
+            with torch.no_grad():
+                _, _, _, features, states, out_state = \
+                    self.core.forward(embed.detach(),
+                                      obs['action'],
+                                      obs['reset'],
+                                      in_state,
+                                      iwae_samples=iwae_samples,
+                                      do_open_loop=do_open_loop)
+            loss_inverse, _ = self.inverse_head.training_step(embed, obs['action'], obs['reset'])
+            loss = self.inverse_head_weight * loss_inverse
+            metrics = dict(loss_inverse=loss_inverse.detach(), loss_model=loss.detach())
+            tensors = {}
+            if mask_feat is not None:
+                # Log the learned mask (and the masked image) so Phase 1 progress is visible
+                # in the npz dumps even though the decoder is skipped.
+                image_mask = self._image_mask(mask_feat, obs['image'])
+                tensors['image_mask'] = (image_mask - 0.5).detach()             # renders as [0,1] grayscale
+                tensors['image_masked'] = (obs['image'] * image_mask).detach()  # what the encoder keeps
+            return loss, features, states, out_state, metrics, tensors
 
         # RSSM
 
@@ -336,9 +384,18 @@ class WorldModel(nn.Module):
         if forward_only:
             return torch.tensor(0.0), features, states, out_state, {}, {}
 
+        # Spatial attention mask -> image-resolution reconstruction weights (detached, so the
+        # reconstruction loss focuses on task-relevant pixels but cannot shrink the mask itself).
+
+        image_mask = self._image_mask(mask_feat, obs['image']) if mask_feat is not None else None
+
         # Decoder
 
-        loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs)
+        loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs, image_mask=image_mask)
+        if image_mask is not None:
+            # Store shifted by -0.5 so the npz un-preprocessing (+0.5)*255 renders the [0,1] mask.
+            tensors.update(image_mask=(image_mask - 0.5).detach(),
+                           image_masked=(obs['image'] * image_mask).detach())
 
         # KL loss
 

@@ -19,7 +19,8 @@ class MultiEncoder(nn.Module):
 
         if conf.image_encoder == 'cnn':
             self.encoder_image = ConvEncoder(in_channels=encoder_channels,
-                                             cnn_depth=conf.cnn_depth)
+                                             cnn_depth=conf.cnn_depth,
+                                             use_spatial_attention=getattr(conf, 'use_spatial_attention', False))
         elif conf.image_encoder == 'dense':
             self.encoder_image = DenseEncoder(in_dim=conf.image_size * conf.image_size * encoder_channels,
                                               out_dim=256,
@@ -39,12 +40,15 @@ class MultiEncoder(nn.Module):
         self.out_dim = ((self.encoder_image.out_dim if self.encoder_image else 0) +
                         (self.encoder_vecobs.out_dim if self.encoder_vecobs else 0))
 
-    def forward(self, obs: Dict[str, Tensor]) -> TensorTBE:
+    def forward(self, obs: Dict[str, Tensor]):
         # TODO:
         #  1) Make this more generic, e.g. working without image input or without vecobs
         #  2) Treat all inputs equally, adding everything via linear layer to embed_dim
+        # Returns (embed, mask): mask is the spatial attention (T,B,1,h,w) in (0,1) from the
+        # image encoder when spatial attention is enabled, else None.
 
         embeds = []
+        mask = None
 
         if self.encoder_image:
             image = obs['image']
@@ -58,7 +62,11 @@ class MultiEncoder(nn.Module):
                                 reward_plane.to(image.dtype),
                                 terminal_plane.to(image.dtype)], dim=-3)
 
-            embed_image = self.encoder_image.forward(image)  # (T,B,E)
+            out = self.encoder_image.forward(image)  # (T,B,E) or ((T,B,E), mask)
+            if isinstance(out, tuple):
+                embed_image, mask = out
+            else:
+                embed_image = out
             embeds.append(embed_image)
 
         if self.encoder_vecobs:
@@ -66,18 +74,21 @@ class MultiEncoder(nn.Module):
             embeds.append(embed_vecobs)
 
         embed = torch.cat(embeds, dim=-1)  # (T,B,E+256)
-        return embed
+        return embed, mask
 
 
 class ConvEncoder(nn.Module):
 
-    def __init__(self, in_channels=3, cnn_depth=32, activation=nn.ELU):
+    def __init__(self, in_channels=3, cnn_depth=32, activation=nn.ELU, use_spatial_attention=False):
         super().__init__()
         self.out_dim = cnn_depth * 32
+        self.use_spatial_attention = use_spatial_attention
         kernels = (4, 4, 4, 4)
         stride = 2
         d = cnn_depth
-        self.model = nn.Sequential(
+        # Backbone: the 4 conv layers without the final Flatten, so we can tap the
+        # spatial feature map (B, d*8, 2, 2) for the attention head.
+        self.backbone = nn.Sequential(
             nn.Conv2d(in_channels, d, kernels[0], stride),
             activation(),
             nn.Conv2d(d, d * 2, kernels[1], stride),
@@ -86,14 +97,30 @@ class ConvEncoder(nn.Module):
             activation(),
             nn.Conv2d(d * 4, d * 8, kernels[3], stride),
             activation(),
-            nn.Flatten()
         )
+        # Attention head: 1x1 conv -> per-location logit -> sigmoid mask in (0,1).
+        # The mask gates the feature map before flattening (so the embed fed to the RSSM
+        # is already biased toward task-relevant locations), and is also returned so the
+        # decoder can weight the reconstruction loss spatially.
+        if use_spatial_attention:
+            self.attn = nn.Conv2d(d * 8, 1, kernel_size=1)
+        else:
+            self.attn = None
+        self.flatten = nn.Flatten()
 
     def forward(self, x):
         x, bd = flatten_batch(x, 3)
-        y = self.model(x)
-        y = unflatten_batch(y, bd)
-        return y
+        feat = self.backbone(x)  # (B, d*8, 2, 2)
+        if self.attn is not None:
+            mask = torch.sigmoid(self.attn(feat))  # (B, 1, 2, 2)
+            embed = self.flatten(feat * mask)      # gate then flatten -> (B, d*32)
+            embed = unflatten_batch(embed, bd)
+            mask = unflatten_batch(mask, bd)       # (T,B,1,2,2)
+            return embed, mask
+        else:
+            embed = self.flatten(feat)
+            embed = unflatten_batch(embed, bd)
+            return embed
 
 
 class DenseEncoder(nn.Module):

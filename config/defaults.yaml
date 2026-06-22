@@ -88,6 +88,13 @@ defaults:
   use_inverse_head: False
   inverse_head_weight: 3.0
 
+  # Spatial attention on the image encoder: learns a task-relevant mask (trained by the
+  # inverse-dynamics loss) that gates the embedding and spatially weights the image
+  # reconstruction loss. encoder_warmup_steps > 0 pre-trains encoder + mask with only the
+  # inverse loss for that many grad steps before the full world model kicks in.
+  use_spatial_attention: False
+  encoder_warmup_steps: 0
+
   # Probe
   probe_model: none
   map_decoder: dense

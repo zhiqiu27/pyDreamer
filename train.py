@@ -169,12 +169,14 @@ def run(conf):
                         state = states.get(wid)
                         if state is None:
                             state = model.init_state(conf.batch_size * conf.iwae_samples)
+                        encoder_warmup = bool(getattr(conf, 'encoder_warmup_steps', 0)) and steps <= conf.encoder_warmup_steps
                         losses, new_state, loss_metrics, tensors, dream_tensors = \
                             model.training_step(
                                 obs,
                                 state,
-                                do_image_pred=will_image_pred,
-                                do_dream_tensors=will_log_batch)
+                                do_image_pred=will_image_pred and not encoder_warmup,
+                                do_dream_tensors=will_log_batch and not encoder_warmup,
+                                encoder_warmup=encoder_warmup)
                         if conf.keep_state:
                             states[wid] = new_state
 

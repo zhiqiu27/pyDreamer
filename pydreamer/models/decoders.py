@@ -50,14 +50,19 @@ class MultiDecoder(nn.Module):
     def training_step(self,
                       features: TensorTBIF,
                       obs: Dict[str, Tensor],
-                      extra_metrics: bool = False
+                      extra_metrics: bool = False,
+                      image_mask: Optional[Tensor] = None
                       ) -> Tuple[TensorTBI, Dict[str, Tensor], Dict[str, Tensor]]:
         tensors = {}
         metrics = {}
         loss_reconstr = 0
 
         if self.image:
-            loss_image_tbi, loss_image, image_rec = self.image.training_step(features, obs['image'])
+            # image_mask (spatial attention weights) only applies to the conv image decoder.
+            if image_mask is not None:
+                loss_image_tbi, loss_image, image_rec = self.image.training_step(features, obs['image'], mask=image_mask)
+            else:
+                loss_image_tbi, loss_image, image_rec = self.image.training_step(features, obs['image'])
             loss_reconstr += self.image_weight * loss_image_tbi
             metrics.update(loss_image=loss_image.detach().mean())
             tensors.update(loss_image=loss_image.detach(),
@@ -160,19 +165,33 @@ class ConvDecoder(nn.Module):
         y = unflatten_batch(y, bd)
         return y
 
-    def loss(self, output: Tensor, target: Tensor) -> Tensor:
+    def loss(self, output: Tensor, target: Tensor, mask: Optional[Tensor] = None) -> Tensor:
         output, bd = flatten_batch(output, 3)
         target, _ = flatten_batch(target, 3)
-        loss = 0.5 * torch.square(output - target).sum(dim=[-1, -2, -3])  # MSE
+        sqerr = 0.5 * torch.square(output - target)  # (B,C,H,W), per-pixel MSE
+        if mask is None:
+            loss = sqerr.sum(dim=[-1, -2, -3])  # sum over C,H,W
+        else:
+            # Spatially-weighted reconstruction: only mask-high (task-relevant) pixels
+            # contribute. Normalize by mean mask value so the loss magnitude stays on the
+            # same scale as the unmasked sum (mask=all-ones recovers the plain sum), which
+            # keeps the KL/reconstruction balance (kl_weight) unchanged. mask is detached
+            # by the caller, so this reweighting never tries to shrink the mask itself.
+            mask, _ = flatten_batch(mask, 3)  # (B,1,H,W)
+            wsum = (sqerr * mask).sum(dim=[-1, -2, -3])           # (B,)
+            norm = mask.mean(dim=[-1, -2, -3]).clamp(min=1e-3)    # (B,)
+            loss = wsum / norm
         return unflatten_batch(loss, bd)
 
-    def training_step(self, features: TensorTBIF, target: TensorTBCHW) -> Tuple[TensorTBI, TensorTB, TensorTBCHW]:
+    def training_step(self, features: TensorTBIF, target: TensorTBCHW, mask: Optional[Tensor] = None) -> Tuple[TensorTBI, TensorTB, TensorTBCHW]:
         assert len(features.shape) == 4 and len(target.shape) == 5
         I = features.shape[2]
         target = insert_dim(target, 2, I)  # Expand target with iwae_samples dim, because features have it
+        if mask is not None:
+            mask = insert_dim(mask, 2, I)  # (T,B,1,H,W) => (T,B,I,1,H,W), broadcasts over C
 
         decoded = self.forward(features)
-        loss_tbi = self.loss(decoded, target)
+        loss_tbi = self.loss(decoded, target, mask)
         loss_tb = -logavgexp(-loss_tbi, dim=2)  # TBI => TB
         decoded = decoded.mean(dim=2)  # TBICHW => TBCHW
 
