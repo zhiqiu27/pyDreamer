@@ -16,6 +16,7 @@ def make_video(npz_path, out_path, batch_idx=0, fps=10):
 
     image = data['image'][batch_idx]        # (T, H, W, 3)  real frames
     image_rec = data.get('image_rec')       # reconstruction (closed-loop only)
+    image_rec_rel = data.get('image_rec_rel')  # relevant-only recon (nuisance zeroed)
     image_pred = data.get('image_pred')     # open-loop prediction
 
     frames = []
@@ -24,6 +25,8 @@ def make_video(npz_path, out_path, batch_idx=0, fps=10):
         cols = [image[t]]
         if image_rec is not None:
             cols.append(image_rec[batch_idx, t])
+        if image_rec_rel is not None:
+            cols.append(image_rec_rel[batch_idx, t])
         if image_pred is not None:
             cols.append(image_pred[batch_idx, t])
 
@@ -39,6 +42,8 @@ def make_video(npz_path, out_path, batch_idx=0, fps=10):
     labels = ['real']
     if image_rec is not None:
         labels.append('reconstruct')
+    if image_rec_rel is not None:
+        labels.append('reconstruct_rel')
     if image_pred is not None:
         labels.append('predict')
     print(f'Columns: {" | ".join(labels)}')

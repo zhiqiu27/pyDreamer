@@ -465,4 +465,11 @@ class WorldModel(nn.Module):
                 tensors.update(**tensors_logprob)  # logprob_image, ...
                 tensors.update(**tensors_pred)  # image_pred, ...
 
+                # Relevant-only reconstruction: decode with nuisance zeroed, so the
+                # background distractor should vanish if z_rel is clean. (diagnostic)
+                if self.nuisance is not None and self.decoder.image is not None:
+                    feat_rel_only = torch.cat([features, torch.zeros_like(nui_sample_i)], -1)
+                    _, _, image_rec_rel = self.decoder.image.training_step(feat_rel_only, obs['image'])
+                    tensors.update(image_rec_rel=image_rec_rel.detach())
+
         return loss, features, states, out_state, metrics, tensors
