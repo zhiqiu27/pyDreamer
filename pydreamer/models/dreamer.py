@@ -348,8 +348,10 @@ class WorldModel(nn.Module):
                       ):
         # Encoder
 
-        embed, mask_feat, rate = self.encoder(obs)  # mask_feat (T,B,1,h,w); rate (T,B) IB rate; or None
         rate_w = self.mask_rate_weight if mask_rate_weight is None else mask_rate_weight
+        # gate engages only when there is compression pressure (beta>0). While beta=0 the gate
+        # is bypassed (m=1), so the encoder learns inverse dynamics on a clean embedding.
+        embed, mask_feat, rate = self.encoder(obs, gate_active=(rate_w > 0))  # mask_feat (T,B,1,h,w); rate (T,B); or None
 
         # Phase 1 warm-up: train only the encoder + spatial-attention head via the
         # inverse-dynamics loss. The RSSM is advanced under no_grad purely to produce a

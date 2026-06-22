@@ -57,10 +57,11 @@ class MultiEncoder(nn.Module):
         self.out_dim = ((self.encoder_image.out_dim if self.encoder_image else 0) +
                         (self.encoder_vecobs.out_dim if self.encoder_vecobs else 0))
 
-    def forward(self, obs: Dict[str, Tensor]):
+    def forward(self, obs: Dict[str, Tensor], gate_active: bool = True):
         # TODO:
         #  1) Make this more generic, e.g. working without image input or without vecobs
         #  2) Treat all inputs equally, adding everything via linear layer to embed_dim
+        # gate_active=False bypasses the VIB gate (used while the rate weight beta=0).
         # Returns (embed, mask, rate):
         #   mask (T,B,1,h,w) = VIB gate probabilities in (0,1), for recon-weighting / viz
         #   rate (T,B)       = IB rate term KL(gate || prior), to be added to the encoder loss
@@ -82,7 +83,7 @@ class MultiEncoder(nn.Module):
                                 reward_plane.to(image.dtype),
                                 terminal_plane.to(image.dtype)], dim=-3)
 
-            out = self.encoder_image.forward(image)  # (T,B,E) or ((T,B,E), mask, rate)
+            out = self.encoder_image.forward(image, gate_active)  # (T,B,E) or ((T,B,E), mask, rate)
             if isinstance(out, tuple):
                 embed_image, mask, rate = out
             else:
@@ -132,7 +133,7 @@ class ConvEncoder(nn.Module):
             self.model = nn.Sequential(*conv)
         self.flatten = nn.Flatten()
 
-    def forward(self, x):
+    def forward(self, x, gate_active=True):
         x, bd = flatten_batch(x, 3)
         if self.attn is None:
             embed = self.flatten(self.model(x))
@@ -141,11 +142,16 @@ class ConvEncoder(nn.Module):
         feat = self.early(x)                       # (B, gate_ch, hs, ws)
         logits = self.attn(feat)                   # (B, 1, hs, ws)  gate logits
         g = torch.sigmoid(logits)                  # gate probability (deterministic; for recon/viz)
-        if self.training:
-            m = gumbel_sigmoid(logits, self.mask_temp)  # relaxed Bernoulli sample
+        if gate_active:
+            if self.training:
+                m = gumbel_sigmoid(logits, self.mask_temp)  # relaxed Bernoulli sample
+            else:
+                m = g                              # eval: expected gate, deterministic
+            feat = feat * m                        # spatial gate, broadcasts over channels
         else:
-            m = g                                  # eval: expected gate, deterministic
-        feat = feat * m                            # spatial gate, broadcasts over channels
+            # Gate bypassed (beta=0 warmup): clean full-pass embedding, attn head frozen
+            # (no gradient reaches it), so inverse dynamics learns on an undisturbed embedding.
+            g = g.detach()
         embed = self.flatten(self.late(feat))      # (B, d*32)
 
         # IB rate term: KL(gate || sparse prior), mean over spatial positions (resolution-invariant)
@@ -179,7 +185,7 @@ class DenseEncoder(nn.Module):
             activation()]
         self.model = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, gate_active=True):  # gate_active ignored (no spatial gate on dense)
         x, bd = flatten_batch(x, 3)
         y = self.model(x)
         y = unflatten_batch(y, bd)
