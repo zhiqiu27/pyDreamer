@@ -122,13 +122,28 @@ def wandb_init(conf=None):
         run_name = os.environ.get('WANDB_NAME') or os.environ.get('MLFLOW_RUN_NAME')
         if run_name:
             print_once('wandb_run_name', f'Wandb run name: {run_name}')
+        settings = wandb.Settings(x_disable_stats=True)
         if run_id:
-            wandb.init(id=run_id, resume='allow', project=project, name=run_name)
+            wandb.init(id=run_id, resume='allow', project=project, name=run_name, settings=settings)
         else:
-            run = wandb.init(project=project, config=vars(conf) if conf else None, name=run_name)
+            run = wandb.init(project=project, config=vars(conf) if conf else None, name=run_name, settings=settings)
             os.environ['WANDB_RUN_ID'] = run.id
     except ImportError:
         pass
+
+
+def _wandb_skip_metric(key: str) -> bool:
+    if key.endswith('/fps'):
+        return True
+    for suffix in ('/steps', '/env_steps', '/steps_saved', '/episodes',
+                   '/data_steps', '/data_env_steps'):
+        if key.endswith(suffix):
+            return True
+    if key.startswith('train/timer_'):
+        return True
+    if key.startswith('train/data_reward') or key in ('train/data_reset', 'train/data_terminal'):
+        return True
+    return False
 
 
 def mlflow_log_metrics(metrics: dict, step: int):
@@ -144,7 +159,9 @@ def mlflow_log_metrics(metrics: dict, step: int):
         import wandb
         if wandb.run is not None:
             clean = {k: v for k, v in metrics.items()
-                     if not k.startswith('_') and np.isfinite(float(v))}
+                     if not k.startswith('_')
+                     and not _wandb_skip_metric(k)
+                     and np.isfinite(float(v))}
             if clean:
                 wandb.log(clean, step=step)
     except Exception:

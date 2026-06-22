@@ -15,7 +15,7 @@ distract:
   distract_scale: 0.1          # camera + color distraction strength (0~1, larger = stronger)
   distract_num_videos: 4       # number of background videos (0 = use all videos in dataset)
   distract_video_alpha: 1.0    # background video opacity (1.0 = fully replace background, 0 = none)
-  distract_ground_alpha: 1.0   # ground plane opacity
+  distract_ground_alpha: 0.3   # ground plane opacity
   distract_background: True    # enable background video distraction
   distract_camera: False        # enable camera shake distraction
   distract_color: False         # enable color distraction
