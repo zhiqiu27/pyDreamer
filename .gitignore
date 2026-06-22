@@ -12,6 +12,8 @@ mlflow.db
 *.npz
 _*.*
 .*
+*.md
+*.exe
 
 !__init__.py
 !.gitignore

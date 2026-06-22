@@ -272,7 +272,7 @@ class VAEWorldModel(nn.Module):
                       ):
         # Encode-sample-decode
 
-        embed, _ = self.encoder(obs)
+        embed, _, _ = self.encoder(obs)
         post = self.post_mlp(embed)
         post = insert_dim(post, 2, iwae_samples)
         post_distr = diag_normal(post)
@@ -343,7 +343,7 @@ class GRUEncoderOnly(nn.Module):
 
         # Encoder
 
-        embed, _ = self.encoder(obs)
+        embed, _, _ = self.encoder(obs)
         embed = self.squeeze(embed)  # squeeze to smaller dimension so embedding input doesn't dominate action input
         action_next = obs['action_next']
         embed_act = torch.cat([embed, action_next], -1)

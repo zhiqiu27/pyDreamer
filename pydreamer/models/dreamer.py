@@ -252,6 +252,7 @@ class WorldModel(nn.Module):
         self.kl_weight = conf.kl_weight
         self.kl_balance = None if conf.kl_balance == 0.5 else conf.kl_balance
         self.aux_critic_weight = conf.aux_critic_weight
+        self.mask_rate_weight = getattr(conf, 'mask_rate_weight', 0.0)  # VIB rate term (encoder only)
 
         # Encoder
 
@@ -343,7 +344,7 @@ class WorldModel(nn.Module):
                       ):
         # Encoder
 
-        embed, mask_feat = self.encoder(obs)  # embed (T,B,E); mask_feat (T,B,1,h,w) or None
+        embed, mask_feat, rate = self.encoder(obs)  # mask_feat (T,B,1,h,w); rate (T,B) IB rate; or None
 
         # Phase 1 warm-up: train only the encoder + spatial-attention head via the
         # inverse-dynamics loss. The RSSM is advanced under no_grad purely to produce a
@@ -361,7 +362,12 @@ class WorldModel(nn.Module):
                                       do_open_loop=do_open_loop)
             loss_inverse, _ = self.inverse_head.training_step(embed, obs['action'], obs['reset'])
             loss = self.inverse_head_weight * loss_inverse
-            metrics = dict(loss_inverse=loss_inverse.detach(), loss_model=loss.detach())
+            metrics = dict(loss_inverse=loss_inverse.detach())
+            if rate is not None:
+                loss_rate = rate.mean()
+                loss = loss + self.mask_rate_weight * loss_rate
+                metrics.update(loss_mask_rate=loss_rate.detach(), mask_mean=mask_feat.mean().detach())
+            metrics['loss_model'] = loss.detach()
             tensors = {}
             if mask_feat is not None:
                 # Log the learned mask (and the masked image) so Phase 1 progress is visible
@@ -445,6 +451,12 @@ class WorldModel(nn.Module):
         loss_model_tbi = self.kl_weight * loss_kl + loss_reconstr
         loss_model = -logavgexp(-loss_model_tbi, dim=2)
         loss = loss_model.mean() + self.aux_critic_weight * loss_critic_aux + self.inverse_head_weight * loss_inverse
+
+        # VIB rate term (encoder-only): keeps the gate sparse in Phase 2 too.
+        if rate is not None:
+            loss_rate = rate.mean()
+            loss = loss + self.mask_rate_weight * loss_rate
+            metrics.update(loss_mask_rate=loss_rate.detach(), mask_mean=mask_feat.mean().detach())
 
         # Metrics
 

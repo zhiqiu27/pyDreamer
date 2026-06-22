@@ -88,12 +88,19 @@ defaults:
   use_inverse_head: False
   inverse_head_weight: 3.0
 
-  # Spatial attention on the image encoder: learns a task-relevant mask (trained by the
-  # inverse-dynamics loss) that gates the embedding and spatially weights the image
-  # reconstruction loss. encoder_warmup_steps > 0 pre-trains encoder + mask with only the
-  # inverse loss for that many grad steps before the full world model kicks in.
+  # Spatial attention on the image encoder: a VIB stochastic gate over CNN feature-map
+  # locations. The gate is trained as an information bottleneck: sufficiency from the
+  # inverse-dynamics loss (keep action-predictive locations) vs. the rate term
+  # KL(gate||prior) (drop everything else), so the surviving mask is the minimal
+  # task-relevant region. The gate also spatially weights the image reconstruction loss.
+  # encoder_warmup_steps > 0 pre-trains encoder + gate with only the inverse + rate loss
+  # for that many grad steps before the full world model kicks in.
   use_spatial_attention: False
   encoder_warmup_steps: 0
+  attention_tap: 2       # gate after this many conv layers: 1->31x31, 2->14x14, 3->6x6, 4->2x2
+  mask_prior: 0.1        # Bernoulli prior pi for the gate (small = sparse)
+  mask_rate_weight: 1.0  # beta: weight of the IB rate term KL(gate||prior)
+  mask_temp: 0.5         # Concrete/Gumbel-sigmoid relaxation temperature
 
   # Probe
   probe_model: none
