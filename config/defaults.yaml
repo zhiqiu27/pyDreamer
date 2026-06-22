@@ -101,6 +101,8 @@ defaults:
   mask_prior: 0.1        # Bernoulli prior pi for the gate (small = sparse)
   mask_rate_weight: 1.0  # beta: weight of the IB rate term KL(gate||prior)
   mask_temp: 0.5         # Concrete/Gumbel-sigmoid relaxation temperature
+  mask_rate_warmup: 0    # steps to hold the rate weight at 0 (let inverse-dynamics learn first)
+  mask_rate_anneal: 0    # steps to linearly ramp the rate weight 0 -> mask_rate_weight after warmup
 
   # Probe
   probe_model: none

@@ -86,7 +86,8 @@ class WorldModelProbe(nn.Module):
                       do_open_loop=False,
                       do_image_pred=False,
                       do_dream_tensors=False,
-                      encoder_warmup=False,  # ignored: baselines have no spatial-attention warm-up
+                      encoder_warmup=False,    # ignored: baselines have no spatial-attention warm-up
+                      mask_rate_weight=None,   # ignored: baselines have no VIB gate
                       ):
         # World model
 

@@ -60,7 +60,7 @@ def build_conf():
 def encoder_mask(model: Dreamer, obs_model, H, W):
     """Run the encoder and return the per-pixel mask (H,W) in [0,1], or None if disabled."""
     with torch.no_grad():
-        embed, mask_feat = model.wm.encoder(obs_model)  # mask_feat (1,1,1,h,w) or None
+        embed, mask_feat, _ = model.wm.encoder(obs_model)  # mask_feat (1,1,1,h,w) or None
     if mask_feat is None:
         return None
     m = mask_feat.reshape(1, 1, mask_feat.shape[-2], mask_feat.shape[-1])

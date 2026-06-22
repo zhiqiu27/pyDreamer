@@ -170,13 +170,25 @@ def run(conf):
                         if state is None:
                             state = model.init_state(conf.batch_size * conf.iwae_samples)
                         encoder_warmup = bool(getattr(conf, 'encoder_warmup_steps', 0)) and steps <= conf.encoder_warmup_steps
+                        # Anneal the VIB rate weight: 0 during mask_rate_warmup (let inverse learn),
+                        # then linear ramp over mask_rate_anneal up to mask_rate_weight.
+                        _rw = float(getattr(conf, 'mask_rate_weight', 0.0))
+                        _warm = int(getattr(conf, 'mask_rate_warmup', 0))
+                        _anneal = int(getattr(conf, 'mask_rate_anneal', 0))
+                        if steps <= _warm:
+                            eff_rate_weight = 0.0
+                        elif _anneal > 0 and steps < _warm + _anneal:
+                            eff_rate_weight = _rw * (steps - _warm) / _anneal
+                        else:
+                            eff_rate_weight = _rw
                         losses, new_state, loss_metrics, tensors, dream_tensors = \
                             model.training_step(
                                 obs,
                                 state,
                                 do_image_pred=will_image_pred and not encoder_warmup,
                                 do_dream_tensors=will_log_batch and not encoder_warmup,
-                                encoder_warmup=encoder_warmup)
+                                encoder_warmup=encoder_warmup,
+                                mask_rate_weight=eff_rate_weight)
                         if conf.keep_state:
                             states[wid] = new_state
 

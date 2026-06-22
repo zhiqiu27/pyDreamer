@@ -119,6 +119,7 @@ class Dreamer(nn.Module):
                       do_image_pred=False,
                       do_dream_tensors=False,
                       encoder_warmup=False,
+                      mask_rate_weight=None,
                       ):
         assert 'action' in obs, '`action` required in observation'
         assert 'reward' in obs, '`reward` required in observation'
@@ -134,9 +135,10 @@ class Dreamer(nn.Module):
         # model optimizer gets non-zero gradients (encoder + inverse head).
 
         if encoder_warmup and self.wm.inverse_head is not None:
-            loss_model, _, _, out_state, metrics, _ = \
-                self.wm.training_step(obs, in_state, iwae_samples=iwae_samples, encoder_only=True)
-            return (loss_model,), out_state, metrics, {}, {}
+            loss_model, _, _, out_state, metrics, tensors = \
+                self.wm.training_step(obs, in_state, iwae_samples=iwae_samples,
+                                      encoder_only=True, mask_rate_weight=mask_rate_weight)
+            return (loss_model,), out_state, metrics, tensors, {}
 
         # World model
 
@@ -145,7 +147,8 @@ class Dreamer(nn.Module):
                                   in_state,
                                   iwae_samples=iwae_samples,
                                   do_open_loop=do_open_loop,
-                                  do_image_pred=do_image_pred)
+                                  do_image_pred=do_image_pred,
+                                  mask_rate_weight=mask_rate_weight)
 
         # Map probe
 
@@ -340,11 +343,13 @@ class WorldModel(nn.Module):
                       do_open_loop=False,
                       do_image_pred=False,
                       forward_only=False,
-                      encoder_only=False
+                      encoder_only=False,
+                      mask_rate_weight=None
                       ):
         # Encoder
 
         embed, mask_feat, rate = self.encoder(obs)  # mask_feat (T,B,1,h,w); rate (T,B) IB rate; or None
+        rate_w = self.mask_rate_weight if mask_rate_weight is None else mask_rate_weight
 
         # Phase 1 warm-up: train only the encoder + spatial-attention head via the
         # inverse-dynamics loss. The RSSM is advanced under no_grad purely to produce a
@@ -365,8 +370,9 @@ class WorldModel(nn.Module):
             metrics = dict(loss_inverse=loss_inverse.detach())
             if rate is not None:
                 loss_rate = rate.mean()
-                loss = loss + self.mask_rate_weight * loss_rate
-                metrics.update(loss_mask_rate=loss_rate.detach(), mask_mean=mask_feat.mean().detach())
+                loss = loss + rate_w * loss_rate
+                metrics.update(loss_mask_rate=loss_rate.detach(), mask_mean=mask_feat.mean().detach(),
+                               mask_rate_w=torch.as_tensor(float(rate_w)))
             metrics['loss_model'] = loss.detach()
             tensors = {}
             if mask_feat is not None:
@@ -455,8 +461,9 @@ class WorldModel(nn.Module):
         # VIB rate term (encoder-only): keeps the gate sparse in Phase 2 too.
         if rate is not None:
             loss_rate = rate.mean()
-            loss = loss + self.mask_rate_weight * loss_rate
-            metrics.update(loss_mask_rate=loss_rate.detach(), mask_mean=mask_feat.mean().detach())
+            loss = loss + rate_w * loss_rate
+            metrics.update(loss_mask_rate=loss_rate.detach(), mask_mean=mask_feat.mean().detach(),
+                           mask_rate_w=torch.as_tensor(float(rate_w)))
 
         # Metrics
 
