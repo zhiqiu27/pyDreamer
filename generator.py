@@ -64,7 +64,7 @@ def main(env_id='MiniGrid-MazeS11N-v0',
 
     repository = MlflowEpisodeRepository(save_uri)
     repository2 = MlflowEpisodeRepository(save_uri2) if save_uri2 else repository
-    nfiles, steps_saved, episodes = repository.count_steps()
+    nfiles, steps_saved, episodes = repository.count_steps() # check existing data in repository
     info(f'Found existing {nfiles} files, {episodes} episodes, {steps_saved} steps in {repository}')
 
     # Env
@@ -129,7 +129,7 @@ def main(env_id='MiniGrid-MazeS11N-v0',
         done = False
         metrics = defaultdict(list)
 
-        while not done:
+        while not done:# until episode is done
             action, mets = policy(obs)
             obs, reward, done, inf = env.step(action)
             steps += 1
@@ -265,7 +265,7 @@ def create_policy(policy_type: str, env, model_conf):
         conf = model_conf
         if conf.model == 'dreamer':
             model = Dreamer(conf)
-        else:
+        else: # unnecessary
             assert False, conf.model
         preprocess = Preprocessor(image_categorical=conf.image_channels if conf.image_categorical else None,
                                   image_key=conf.image_key,
@@ -278,25 +278,25 @@ def create_policy(policy_type: str, env, model_conf):
     if policy_type == 'random':
         return RandomPolicy(env.action_space)
 
-    if policy_type == 'minigrid_wander':
-        from pydreamer.envs.minigrid import MinigridWanderPolicy
-        return MinigridWanderPolicy()
+    # if policy_type == 'minigrid_wander':
+    #     from pydreamer.envs.minigrid import MinigridWanderPolicy
+    #     return MinigridWanderPolicy()
 
-    if policy_type == 'maze_bouncing_ball':
-        from pydreamer.envs.miniworld import MazeBouncingBallPolicy
-        return MazeBouncingBallPolicy()
+    # if policy_type == 'maze_bouncing_ball':
+    #     from pydreamer.envs.miniworld import MazeBouncingBallPolicy
+    #     return MazeBouncingBallPolicy()
 
-    if policy_type == 'maze_dijkstra':
-        from pydreamer.envs.miniworld import MazeDijkstraPolicy
-        step_size = env.params.params['forward_step'].default / env.room_size  # type: ignore
-        turn_size = env.params.params['turn_step'].default  # type: ignore
-        return MazeDijkstraPolicy(step_size, turn_size)
+    # if policy_type == 'maze_dijkstra':
+    #     from pydreamer.envs.miniworld import MazeDijkstraPolicy
+    #     step_size = env.params.params['forward_step'].default / env.room_size  # type: ignore
+    #     turn_size = env.params.params['turn_step'].default  # type: ignore
+    #     return MazeDijkstraPolicy(step_size, turn_size)
 
-    if policy_type == 'goal_dijkstra':
-        from pydreamer.envs.miniworld import MazeDijkstraPolicy
-        step_size = env.params.params['forward_step'].default / env.room_size  # type: ignore
-        turn_size = env.params.params['turn_step'].default  # type: ignore
-        return MazeDijkstraPolicy(step_size, turn_size, goal_strategy='goal_direction', random_prob=0)
+    # if policy_type == 'goal_dijkstra':
+    #     from pydreamer.envs.miniworld import MazeDijkstraPolicy
+    #     step_size = env.params.params['forward_step'].default / env.room_size  # type: ignore
+    #     turn_size = env.params.params['turn_step'].default  # type: ignore
+    #     return MazeDijkstraPolicy(step_size, turn_size, goal_strategy='goal_direction', random_prob=0)
 
     raise ValueError(policy_type)
 
@@ -313,14 +313,14 @@ class NetworkPolicy:
     def __init__(self, model: Dreamer, preprocess: Preprocessor):
         self.model = model
         self.preprocess = preprocess
-        self.state = model.init_state(1)
+        self.state = model.init_state(1)# s_{t-1}
 
     def __call__(self, obs) -> Tuple[np.ndarray, dict]:
         batch = self.preprocess.apply(obs, expandTB=True)
         obs_model: Dict[str, Tensor] = map_structure(batch, torch.from_numpy)  # type: ignore
 
         with torch.no_grad():
-            action_distr, new_state, metrics = self.model.inference(obs_model, self.state)
+            action_distr, new_state, metrics = self.model.inference(obs_model, self.state)# a_t, s_t = policy(obs_t, s_{t-1})
             action = action_distr.sample()
             self.state = new_state
 

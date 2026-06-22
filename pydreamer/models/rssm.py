@@ -91,6 +91,43 @@ class RSSMCore(nn.Module):
         return self.cell.zdistr(pp)
 
 
+class NuisanceVAE(nn.Module):
+    """Per-frame nuisance latent (plain VAE, no temporal model).
+
+    Encodes whatever the task-relevant RSSM latent does not explain (e.g. a
+    background distractor) so it stops polluting the reconstruction signal of
+    z_rel. It is deliberately non-recurrent: the policy never imagines the
+    nuisance branch, so z_nui needs no prior/transition - a per-frame posterior
+    q(z_nui|o_t) against a fixed N(0,1) prior is sufficient. Separation from
+    z_rel is achieved by asymmetric KL weighting (low weight here, high on the
+    RSSM), not by any assumption that the distractor is static.
+    """
+
+    def __init__(self, embed_dim, stoch_dim, hidden_dim, layer_norm):
+        super().__init__()
+        self.stoch_dim = stoch_dim
+        norm = nn.LayerNorm if layer_norm else NoNorm
+        self.post = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            norm(hidden_dim, eps=1e-3),
+            nn.ELU(),
+            nn.Linear(hidden_dim, 2 * stoch_dim),
+        )
+
+    def forward(self, embed: Tensor):
+        # embed: (T,B,E) => posterior over per-frame nuisance latent
+        post = self.post(embed)                  # (T,B,2S)
+        distr = diag_normal(post)                # Independent Normal over last dim
+        sample = distr.rsample()                 # (T,B,S)
+        return sample, distr
+
+    def kl_prior(self, distr: D.Distribution) -> Tensor:
+        # KL(q(z_nui|o) || N(0,1)), reduced over stoch dim => (T,B)
+        prior = D.independent.Independent(
+            D.normal.Normal(torch.zeros_like(distr.mean), torch.ones_like(distr.mean)), 1)
+        return D.kl.kl_divergence(distr, prior)
+
+
 class RSSMCell(nn.Module):
 
     def __init__(self, embed_dim, action_dim, deter_dim, stoch_dim, stoch_discrete, hidden_dim, gru_layers, gru_type, layer_norm):

@@ -42,7 +42,7 @@ def launch():
     conf = parser.parse_args(remaining)
 
     # Mlflow
-
+    # main worker is the learner, other workers are generators
     worker_type, worker_index = get_worker_info()
     is_main_worker = worker_type is None or worker_type == 'learner'
     if is_main_worker and not os.environ.get('MLFLOW_RUN_NAME'):
@@ -58,7 +58,7 @@ def launch():
     # Launch train+eval generators
 
     subprocesses: List[Process] = []
-    for i in range(conf.generator_workers):
+    for i in range(conf.generator_workers):# number of generator workers
         if belongs_to_worker('generator', i):
             info(f'Launching train+eval generator {i}')
             p = launch_generator(

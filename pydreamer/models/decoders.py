@@ -9,19 +9,22 @@ from .common import *
 
 class MultiDecoder(nn.Module):
 
-    def __init__(self, features_dim, conf):
+    def __init__(self, features_dim, conf, recon_dim=None):
         super().__init__()
         self.image_weight = conf.image_weight
         self.vecobs_weight = conf.vecobs_weight
         self.reward_weight = conf.reward_weight
         self.terminal_weight = conf.terminal_weight
+        # Image/vecobs reconstruction may use a wider feature (relevant + nuisance);
+        # reward/terminal always use only the task-relevant feature (features_dim).
+        recon_dim = recon_dim if recon_dim is not None else features_dim
 
         if conf.image_decoder == 'cnn':
-            self.image = ConvDecoder(in_dim=features_dim,
+            self.image = ConvDecoder(in_dim=recon_dim,
                                      out_channels=conf.image_channels,
                                      cnn_depth=conf.cnn_depth)
         elif conf.image_decoder == 'dense':
-            self.image = CatImageDecoder(in_dim=features_dim,
+            self.image = CatImageDecoder(in_dim=recon_dim,
                                          out_shape=(conf.image_channels, conf.image_size, conf.image_size),
                                          hidden_layers=conf.image_decoder_layers,
                                          layer_norm=conf.layer_norm,
@@ -43,18 +46,23 @@ class MultiDecoder(nn.Module):
         self.terminal = DenseBernoulliDecoder(in_dim=features_dim, hidden_layers=conf.terminal_decoder_layers, layer_norm=conf.layer_norm)
 
         if conf.vecobs_size:
-            self.vecobs = DenseNormalDecoder(in_dim=features_dim, out_dim=conf.vecobs_size, hidden_layers=4, layer_norm=conf.layer_norm)
+            self.vecobs = DenseNormalDecoder(in_dim=recon_dim, out_dim=conf.vecobs_size, hidden_layers=4, layer_norm=conf.layer_norm)
         else:
             self.vecobs = None
 
     def training_step(self,
                       features: TensorTBIF,
                       obs: Dict[str, Tensor],
-                      extra_metrics: bool = False
+                      extra_metrics: bool = False,
+                      features_task: Optional[TensorTBIF] = None,
                       ) -> Tuple[TensorTBI, Dict[str, Tensor], Dict[str, Tensor]]:
         tensors = {}
         metrics = {}
         loss_reconstr = 0
+        # `features` reconstructs image/vecobs (relevant + nuisance when factored);
+        # `features_task` predicts reward/terminal (relevant only). Defaults to the
+        # same tensor for the non-factored path.
+        features_task = features if features_task is None else features_task
 
         if self.image:
             loss_image_tbi, loss_image, image_rec = self.image.training_step(features, obs['image'])
@@ -70,13 +78,13 @@ class MultiDecoder(nn.Module):
             tensors.update(loss_vecobs=loss_vecobs.detach(),
                            vecobs_rec=vecobs_rec.detach())
 
-        loss_reward_tbi, loss_reward, reward_rec = self.reward.training_step(features, obs['reward'])
+        loss_reward_tbi, loss_reward, reward_rec = self.reward.training_step(features_task, obs['reward'])
         loss_reconstr += self.reward_weight * loss_reward_tbi
         metrics.update(loss_reward=loss_reward.detach().mean())
         tensors.update(loss_reward=loss_reward.detach(),
                        reward_rec=reward_rec.detach())
 
-        loss_terminal_tbi, loss_terminal, terminal_rec = self.terminal.training_step(features, obs['terminal'])
+        loss_terminal_tbi, loss_terminal, terminal_rec = self.terminal.training_step(features_task, obs['terminal'])
         loss_reconstr += self.terminal_weight * loss_terminal_tbi
         metrics.update(loss_terminal=loss_terminal.detach().mean())
         tensors.update(loss_terminal=loss_terminal.detach(),

@@ -88,6 +88,14 @@ defaults:
   use_inverse_head: False
   inverse_head_weight: 3.0
 
+  # Factored latent: split into task-relevant z (RSSM) + nuisance z (per-frame VAE).
+  # Policy/reward/terminal/inv_head use only the relevant features; image/vecobs
+  # reconstruction uses both. Separation is driven by asymmetric KL: keep kl_weight
+  # (relevant) high and kl_weight_nui (nuisance) low so distractors flow into z_nui.
+  factored_latent: False
+  nui_stoch_dim: 32
+  kl_weight_nui: 0.1
+
   # Probe
   probe_model: none
   map_decoder: dense

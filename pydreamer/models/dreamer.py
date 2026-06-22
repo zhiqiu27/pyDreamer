@@ -170,7 +170,12 @@ class Dreamer(nn.Module):
                 # Oh, and we set here H=T-1, so we get (T,B), and the dreamed experience aligns with actual.
                 in_state_dream: StateB = map_structure(states, lambda x: x.detach()[0, :, 0])  # type: ignore  # (T,B,I) => (B)
                 features_dream, actions_dream, rewards_dream, terminals_dream = self.dream(in_state_dream, T - 1)  # H = T-1
-                image_dream = self.wm.decoder.image.forward(features_dream)
+                # Nuisance is not imagined; feed zeros (prior mean) so the decoder gets its expected width.
+                if self.wm.nuisance is not None:
+                    nui_zeros = torch.zeros(features_dream.shape[:-1] + (self.wm.nui_stoch_dim,), device=features_dream.device, dtype=features_dream.dtype)
+                    image_dream = self.wm.decoder.image.forward(torch.cat([features_dream, nui_zeros], -1))
+                else:
+                    image_dream = self.wm.decoder.image.forward(features_dream)
                 _, _, tensors_ac = self.ac.training_step(features_dream, actions_dream, rewards_dream.mean, terminals_dream.mean, log_only=True)
                 # The tensors are intentionally named same as in tensors, so the logged npz looks the same for dreamed or not
                 dream_tensors = dict(action_pred=torch.cat([obs['action'][:1], actions_dream]),  # first action is real from previous step
@@ -247,10 +252,29 @@ class WorldModel(nn.Module):
 
         self.encoder = MultiEncoder(conf)
 
-        # Decoders
+        # Factored latent: task-relevant z (RSSM) + nuisance z (per-frame VAE).
+        # Relevant features = (h, z_rel) of dim features_dim drive policy/reward/
+        # terminal/inv_head; image/vecobs reconstruction additionally sees z_nui.
 
         features_dim = conf.deter_dim + conf.stoch_dim * (conf.stoch_discrete or 1)
-        self.decoder = MultiDecoder(features_dim, conf)
+        self.factored = getattr(conf, 'factored_latent', False)
+        if self.factored:
+            self.nui_stoch_dim = conf.nui_stoch_dim
+            self.kl_weight_nui = getattr(conf, 'kl_weight_nui', 0.1)
+            self.nuisance = NuisanceVAE(embed_dim=self.encoder.out_dim,
+                                        stoch_dim=conf.nui_stoch_dim,
+                                        hidden_dim=conf.hidden_dim,
+                                        layer_norm=conf.layer_norm)
+            recon_dim = features_dim + conf.nui_stoch_dim
+        else:
+            self.nuisance = None
+            self.nui_stoch_dim = 0
+            self.kl_weight_nui = 0.0
+            recon_dim = features_dim
+
+        # Decoders
+
+        self.decoder = MultiDecoder(features_dim, conf, recon_dim=recon_dim)
 
         # RSSM
 
@@ -336,9 +360,22 @@ class WorldModel(nn.Module):
         if forward_only:
             return torch.tensor(0.0), features, states, out_state, {}, {}
 
-        # Decoder
+        # Nuisance latent (per-frame VAE). Only used for reconstruction; policy and
+        # task heads never see it, and it is never imagined.
 
-        loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs)
+        if self.nuisance is not None:
+            I = features.shape[2]
+            nui_sample, nui_distr = self.nuisance(embed)              # (T,B,Snui)
+            nui_sample_i = insert_dim(nui_sample, 2, I)               # (T,B,I,Snui)
+            features_recon = torch.cat([features, nui_sample_i], -1)  # (T,B,I,F+Snui)
+            loss_kl_nui = insert_dim(self.nuisance.kl_prior(nui_distr), 2, I)  # (T,B,I)
+        else:
+            features_recon = features
+            loss_kl_nui = None
+
+        # Decoder: image/vecobs from (relevant + nuisance), reward/terminal from relevant
+
+        loss_reconstr, metrics, tensors = self.decoder.training_step(features_recon, obs, features_task=features)
 
         # KL loss
 
@@ -386,6 +423,9 @@ class WorldModel(nn.Module):
 
         assert loss_kl.shape == loss_reconstr.shape
         loss_model_tbi = self.kl_weight * loss_kl + loss_reconstr
+        if loss_kl_nui is not None:
+            assert loss_kl_nui.shape == loss_reconstr.shape
+            loss_model_tbi = loss_model_tbi + self.kl_weight_nui * loss_kl_nui
         loss_model = -logavgexp(-loss_model_tbi, dim=2)
         loss = loss_model.mean() + self.aux_critic_weight * loss_critic_aux + self.inverse_head_weight * loss_inverse
 
@@ -402,6 +442,8 @@ class WorldModel(nn.Module):
                            loss_kl=loss_kl.mean(),
                            entropy_prior=entropy_prior.mean(),
                            entropy_post=entropy_post.mean())
+            if loss_kl_nui is not None:
+                metrics.update(loss_kl_nui=loss_kl_nui.mean())
 
         # Predictions
 
@@ -409,8 +451,13 @@ class WorldModel(nn.Module):
             with torch.no_grad():
                 prior_samples = self.core.zdistr(prior).sample().reshape(post_samples.shape)
                 features_prior = self.core.feature_replace_z(features, prior_samples)
-                # Decode from prior
-                _, mets, tens = self.decoder.training_step(features_prior, obs, extra_metrics=True)
+                # Decode from prior: relevant z is sampled from the prior, but nuisance
+                # comes from its (posterior) per-frame sample so the background is shown.
+                if self.nuisance is not None:
+                    features_prior_recon = torch.cat([features_prior, nui_sample_i], -1)
+                else:
+                    features_prior_recon = features_prior
+                _, mets, tens = self.decoder.training_step(features_prior_recon, obs, extra_metrics=True, features_task=features_prior)
                 metrics_logprob = {k.replace('loss_', 'logprob_'): v for k, v in mets.items() if k.startswith('loss_')}
                 tensors_logprob = {k.replace('loss_', 'logprob_'): v for k, v in tens.items() if k.startswith('loss_')}
                 tensors_pred = {k.replace('_rec', '_pred'): v for k, v in tens.items() if k.endswith('_rec')}
