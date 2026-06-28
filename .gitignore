@@ -8,7 +8,8 @@ logs/
 mlruns/
 wandb/
 mlflow.db
-
+*.mp4
+*.npz
 _*.*
 .*
 
