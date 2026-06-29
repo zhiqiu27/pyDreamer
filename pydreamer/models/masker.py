@@ -135,6 +135,7 @@ class ObservationMasker(nn.Module):
                       weight_inv: float = 1.0,
                       weight_reward: float = 1.0,
                       weight_coverage: float = 0.1,
+                      mask_temp: float = 0.5,
                       ) -> Tuple[Tensor, Dict]:
         """
         Args:
@@ -154,15 +155,25 @@ class ObservationMasker(nn.Module):
         # Apply mask (gradients flow through mask_net via all three losses)
         masked_v1, mask = self.forward(img_v1)   # mask: (T, B, 1, H, W)
 
-        # --- Loss 1: background contrast ---
-        # bg_diff is large where backgrounds differ (background pixels)
-        # -> penalise mask for covering high-diff regions
-        # -> weight_coverage term prevents mask from collapsing to 0
+        # --- Loss 1: direct mask supervision from background contrast ---
+        # v1/v2 share the foreground and differ only in background, so bg_diff≈0 on
+        # the foreground and large on the background. Turn that into a *spatially
+        # localized* soft target and supervise the mask directly (BCE).
+        #
+        # Why not the old force-balance ((mask*bg_diff) down + coverage up)? A
+        # multiplicative soft mask is scale-degenerate: a uniform small mask keeps
+        # all information (encoder just rescales), so inverse/reward cannot localize
+        # or hold the mask up, and coverage is uniform — the only localizing signal
+        # is bg_diff, and under area-dominant backgrounds the CNN collapses to a
+        # uniform tiny mask. A direct localized target cannot collapse to a uniform
+        # value, and it teaches mask_net to predict the foreground from a single
+        # image (which is all that is available at deployment time).
         with torch.no_grad():
             bg_diff = (img_v1 - img_v2).abs().mean(dim=2, keepdim=True)  # (T, B, 1, H, W)
-            bg_diff = bg_diff / (bg_diff.mean() + 1e-6)  # normalize so scale is ~1
-        loss_bg = (mask * bg_diff).mean()
-        loss_coverage = -mask.mean()  # maximise coverage to counter loss_bg
+            bg_diff = bg_diff / (bg_diff.mean() + 1e-6)                  # normalize, scale ~1
+            fg_target = torch.exp(-bg_diff / mask_temp)                  # 1 on fg, ->0 on bg
+        mask_c = mask.clamp(1e-4, 1 - 1e-4)
+        loss_mask = F.binary_cross_entropy(mask_c, fg_target)
 
         # --- Loss 2: inverse dynamics ---
         # masked features at (t, t+1) should predict action_t
@@ -189,23 +200,24 @@ class ObservationMasker(nn.Module):
         loss_reward = F.mse_loss(reward_pred, reward_target)
 
         # --- Total ---
-        loss = (weight_bg       * loss_bg
-              + weight_coverage  * loss_coverage
-              + weight_inv       * loss_inv
-              + weight_reward    * loss_reward)
+        # weight_bg now weights the (supervised) mask loss. inverse/reward are
+        # auxiliary: they ground the aux_encoder but cannot localize the mask, so
+        # they can be set to 0 for a pure mask-localization sanity check.
+        loss = (weight_bg     * loss_mask
+              + weight_inv    * loss_inv
+              + weight_reward * loss_reward)
 
         with torch.no_grad():
             # mask averaged over background vs foreground regions (bg_diff above/below
             # its own mean) — the gap is the clearest sanity signal: bg should drop,
             # fg should stay high.
-            is_bg = (bg_diff > bg_diff.mean()).float()
+            is_bg = (bg_diff > 1.0).float()  # bg_diff is normalized to mean 1
             mask_bg = (mask * is_bg).sum() / is_bg.sum().clamp(min=1.0)
             mask_fg = (mask * (1 - is_bg)).sum() / (1 - is_bg).sum().clamp(min=1.0)
 
         metrics = {
             'loss_masker':   loss.detach(),
-            'loss_bg':       loss_bg.detach(),
-            'loss_coverage': loss_coverage.detach(),
+            'loss_mask':     loss_mask.detach(),
             'loss_inv':      loss_inv.detach(),
             'loss_reward':   loss_reward.detach(),
             'mask_mean':     mask.detach().mean(),

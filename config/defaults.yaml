@@ -98,6 +98,7 @@ defaults:
   masker_weight_reward: 1.0       # reward prediction loss weight
   masker_weight_coverage: 0.1     # coverage regularization weight (prevents mask collapse)
   masker_bg_warmup_steps: 1000    # ramp weight_bg 0->target over these steps (let inverse learn first)
+  masker_mask_temp: 0.5           # temperature for exp(-bg_diff/temp) foreground target (smaller=sharper)
 
   # Inverse dynamics head (auxiliary representation loss on encoder embedding)
   use_inverse_head: False

@@ -157,6 +157,7 @@ def run(conf):
             weight_inv=getattr(conf, 'masker_weight_inv', 1.0),
             weight_reward=getattr(conf, 'masker_weight_reward', 1.0),
             weight_coverage=getattr(conf, 'masker_weight_coverage', 0.1),
+            mask_temp=getattr(conf, 'masker_mask_temp', 0.5),
         )
 
         optimizer.zero_grad()
@@ -174,10 +175,11 @@ def run(conf):
             mlflow_log_metrics(log, step=steps)
             info(f'[{steps:06}]'
                  f'  loss: {np.mean(log_metrics["loss_masker"]):.4f}'
-                 f'  bg: {np.mean(log_metrics["loss_bg"]):.4f}'
+                 f'  mask: {np.mean(log_metrics["loss_mask"]):.4f}'
                  f'  inv: {np.mean(log_metrics["loss_inv"]):.4f}'
-                 f'  reward: {np.mean(log_metrics["loss_reward"]):.4f}'
-                 f'  mask_mean: {np.mean(log_metrics["mask_mean"]):.3f}')
+                 f'  mask_mean: {np.mean(log_metrics["mask_mean"]):.3f}'
+                 f'  fg: {np.mean(log_metrics["mask_fg"]):.3f}'
+                 f'  bg: {np.mean(log_metrics["mask_bg"]):.3f}')
             log_metrics = defaultdict(list)
 
         if steps % conf.save_interval == 0:
