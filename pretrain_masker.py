@@ -143,9 +143,17 @@ def run(conf):
 
         img_v1, img_v2 = get_background_aug_pair(batch, device)
 
+        # Background-loss warmup: keep weight_bg=0 for the first warmup steps so the
+        # inverse/reward heads (with coverage holding the mask high) learn to use the
+        # foreground BEFORE the background loss starts pushing the mask down. Without
+        # this the area-dominant background collapses the mask to 0 before inverse can
+        # exploit it, and once collapsed inverse can never recover.
+        bg_warmup = getattr(conf, 'masker_bg_warmup_steps', 1000)
+        weight_bg = getattr(conf, 'masker_weight_bg', 1.0) * min(1.0, steps / max(1, bg_warmup))
+
         loss, metrics = masker.training_step(
             img_v1, img_v2, action, reward, reset,
-            weight_bg=getattr(conf, 'masker_weight_bg', 1.0),
+            weight_bg=weight_bg,
             weight_inv=getattr(conf, 'masker_weight_inv', 1.0),
             weight_reward=getattr(conf, 'masker_weight_reward', 1.0),
             weight_coverage=getattr(conf, 'masker_weight_coverage', 0.1),
