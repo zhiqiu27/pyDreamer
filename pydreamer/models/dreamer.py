@@ -11,6 +11,7 @@ from .common import *
 from .functions import *
 from .encoders import *
 from .decoders import *
+from .masker import ObservationMasker
 from .rnn import *
 from .rssm import *
 from .probes import *
@@ -221,7 +222,7 @@ class Dreamer(nn.Module):
         # Short representation
         s = []
         s.append(f'Model: {param_count(self)} parameters')
-        for submodel in (self.wm.encoder, self.wm.decoder, self.wm.core, self.wm.inverse_head, self.ac, self.probe_model):
+        for submodel in (self.wm.masker, self.wm.encoder, self.wm.decoder, self.wm.core, self.wm.inverse_head, self.ac, self.probe_model):
             if submodel is not None:
                 s.append(f'  {type(submodel).__name__:<15}: {param_count(submodel)} parameters')
         return '\n'.join(s)
@@ -263,6 +264,19 @@ class WorldModel(nn.Module):
                              gru_layers=conf.gru_layers,
                              gru_type=conf.gru_type,
                              layer_norm=conf.layer_norm)
+
+        # Observation masker (pre-trained externally, applied before encoder)
+
+        self.use_masker = getattr(conf, 'use_masker', False)
+        if self.use_masker:
+            self.masker = ObservationMasker(
+                in_channels=conf.image_channels,
+                action_dim=conf.action_dim,
+                depth=getattr(conf, 'masker_depth', 32),
+                actor_dist=conf.actor_dist,
+            )
+        else:
+            self.masker = None
 
         # Inverse dynamics head (auxiliary representation loss on encoder embedding)
 
@@ -319,9 +333,18 @@ class WorldModel(nn.Module):
                       do_image_pred=False,
                       forward_only=False
                       ):
+        # Masker: produce masked image for encoder; decoder still targets original obs
+
+        if self.masker is not None and 'image' in obs:
+            masked_image, mask = self.masker(obs['image'])
+            obs_enc = dict(obs, image=masked_image)  # shallow copy, only replaces image
+        else:
+            obs_enc = obs
+            mask = None
+
         # Encoder
 
-        embed = self.encoder(obs)
+        embed = self.encoder(obs_enc)
 
         # RSSM
 
@@ -336,9 +359,11 @@ class WorldModel(nn.Module):
         if forward_only:
             return torch.tensor(0.0), features, states, out_state, {}, {}
 
-        # Decoder
+        # Decoder (supervised on masked obs, consistent with encoder input)
 
-        loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs)
+        loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs_enc)
+        if mask is not None:
+            tensors['mask'] = mask.detach()
 
         # KL loss
 
@@ -410,7 +435,7 @@ class WorldModel(nn.Module):
                 prior_samples = self.core.zdistr(prior).sample().reshape(post_samples.shape)
                 features_prior = self.core.feature_replace_z(features, prior_samples)
                 # Decode from prior
-                _, mets, tens = self.decoder.training_step(features_prior, obs, extra_metrics=True)
+                _, mets, tens = self.decoder.training_step(features_prior, obs_enc, extra_metrics=True)
                 metrics_logprob = {k.replace('loss_', 'logprob_'): v for k, v in mets.items() if k.startswith('loss_')}
                 tensors_logprob = {k.replace('loss_', 'logprob_'): v for k, v in tens.items() if k.startswith('loss_')}
                 tensors_pred = {k.replace('_rec', '_pred'): v for k, v in tens.items() if k.endswith('_rec')}

@@ -84,6 +84,20 @@ defaults:
   reward_decoder_categorical:
   terminal_decoder_layers: 4
 
+  # Observation masker (pre-trained externally via pretrain_masker.py)
+  use_masker: False
+  masker_run_id: ''       # MLflow run_id from pretrain_masker.py
+  masker_frozen: True     # freeze masker weights during world-model training
+  masker_depth: 32        # conv channels in masker CNN
+  masker_env_id: ''               # PairedDistractingDMC-easy-quadruped_run; defaults to env_id if empty
+  masker_prefill_steps: 10_000    # wait for this many steps before starting masker training
+  masker_data_steps: 100_000      # total steps to collect for masker pre-training
+  masker_train_steps: 50_000      # gradient steps to train masker
+  masker_weight_bg: 1.0           # background contrast loss weight
+  masker_weight_inv: 1.0          # inverse dynamics loss weight
+  masker_weight_reward: 1.0       # reward prediction loss weight
+  masker_weight_coverage: 0.1     # coverage regularization weight (prevents mask collapse)
+
   # Inverse dynamics head (auxiliary representation loss on encoder embedding)
   use_inverse_head: False
   inverse_head_weight: 3.0

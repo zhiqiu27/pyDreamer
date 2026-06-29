@@ -155,3 +155,97 @@ class DistractingDMC(DMC):
             if value.shape == (0,):
                 print(f"Ignoring empty observation key '{key}'.")
                 self._ignored_keys.append(key)
+
+
+class PairedDistractingDMC(DistractingDMC):
+    """Single distracting env, rendered twice per frame with two different
+    backgrounds. Every observation includes 'image' (background A) and 'image2'
+    (background B).
+
+    The pair is pixel-identical everywhere EXCEPT the background by construction:
+    both images are rendered from the SAME physics state (same qpos → same
+    foreground geometry, same cam_xpos → same camera, same mat_rgba → same
+    colors); only the sky texture (SKY_TEXTURE_INDEX) is swapped between the two
+    renders. So camera/color distractions can stay ON — they are shared by both
+    views — and bg_diff = |image - image2| isolates the background alone.
+
+    Used by pretrain_masker.py to generate clean paired augmentation data with no
+    second physics instance, no state syncing, and no foreground contamination.
+    """
+
+    def __init__(self, name, action_repeat=1, size=(64, 64),
+                 difficulty='easy', dynamic=False,
+                 background_dataset_path='/home/csy24/DAVIS/JPEGImages/480p/',
+                 custom_kwargs=None):
+        super().__init__(name, action_repeat, size, difficulty, dynamic,
+                         background_dataset_path, custom_kwargs)
+        # The background wrapper owns the video pool and the sky texture.
+        self._bg = self._find_bg_wrapper(self._env)
+        assert self._bg is not None and self._bg._video_paths, \
+            'PairedDistractingDMC needs background distraction enabled with videos'
+        self._video_alpha = (custom_kwargs or {}).get('video_alpha', 1.0)
+        self._rng2 = np.random.RandomState()   # independent sampler for the 2nd bg
+        self._tex_b = None
+
+    @staticmethod
+    def _find_bg_wrapper(env):
+        from distracting_control import background as dcbg
+        while env is not None:
+            if isinstance(env, dcbg.DistractingBackgroundEnv):
+                return env
+            env = getattr(env, '_env', None)
+        return None
+
+    def _sky_slice(self):
+        from distracting_control.background import SKY_TEXTURE_INDEX as I
+        m = self._env.physics.model
+        return int(m.tex_adr[I]), int(m.tex_height[I] * m.tex_width[I] * 3)
+
+    def _build_second_bg(self):
+        """Prepare a second sky texture from a different random DAVIS frame."""
+        import os
+        from pathlib import Path
+        from distracting_control import background as dcbg
+        I = dcbg.SKY_TEXTURE_INDEX
+        m = self._env.physics.model
+        adr, size = self._sky_slice()
+        h, w = int(m.tex_height[I]), int(m.tex_width[I])
+        base = dcbg.get_texture_data(m)[adr:adr + size].astype(np.float32)  # only used if alpha<1
+        video = self._rng2.choice(self._bg._video_paths)
+        frames = [p.name for p in Path(video).glob('*/')]
+        img = dcbg.imread(os.path.join(video, self._rng2.choice(frames)))
+        flat = dcbg.size_and_flatten(img, h, w)
+        self._tex_b = dcbg.blend_to_background(self._video_alpha, flat, base)
+
+    def _render_swapped(self, tex):
+        """Swap in `tex` as the sky texture, render, then restore the original."""
+        from distracting_control import background as dcbg
+        from dm_control.mujoco.wrapper import mjbindings
+        physics = self._env.physics
+        adr, size = self._sky_slice()
+        data = dcbg.get_texture_data(physics.model)
+        saved = data[adr:adr + size].copy()            # current background (A)
+
+        def _upload():
+            with physics.contexts.gl.make_current() as ctx:
+                ctx.call(mjbindings.mjlib.mjr_uploadTexture,
+                         physics.model.ptr, physics.contexts.mujoco.ptr,
+                         dcbg.SKY_TEXTURE_INDEX)
+
+        data[adr:adr + size] = tex
+        _upload()
+        img = physics.render(*self._size, camera_id=self._camera)
+        data[adr:adr + size] = saved                   # restore A (required in static mode)
+        _upload()
+        return img
+
+    def reset(self):
+        obs = super().reset()                          # obs['image'] rendered with bg A
+        self._build_second_bg()                        # sample bg B for this episode
+        obs['image2'] = self._render_swapped(self._tex_b)
+        return obs
+
+    def step(self, action):
+        obs, reward, done, info = super().step(action)  # obs['image'] rendered with bg A
+        obs['image2'] = self._render_swapped(self._tex_b)
+        return obs, reward, done, info

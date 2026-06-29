@@ -203,6 +203,34 @@ def mlflow_save_checkpoint(model, optimizers, steps):
         mlflow_log_artifact(path, subdir='checkpoints')
 
 
+def mlflow_save_masker_checkpoint(masker, steps):
+    import torch
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / 'masker.pt'
+        torch.save({'epoch': steps, 'masker_state_dict': masker.state_dict()}, path)
+        mlflow_log_artifact(path, subdir='checkpoints')
+
+
+def mlflow_load_masker_checkpoint(masker, artifact_path='checkpoints/masker.pt', map_location=None):
+    import mlflow
+    from mlflow.tracking.client import MlflowClient
+    import torch
+    with tempfile.TemporaryDirectory() as tmpdir:
+        client = MlflowClient()
+        run_id = mlflow.active_run().info.run_id  # type: ignore
+        try:
+            path = client.download_artifacts(run_id, artifact_path, tmpdir)
+        except Exception:
+            return None
+        try:
+            checkpoint = torch.load(path, map_location=map_location)
+        except Exception:
+            exception('Error reading masker checkpoint')
+            return None
+        masker.load_state_dict(checkpoint['masker_state_dict'])
+        return checkpoint['epoch']
+
+
 def mlflow_load_checkpoint(model, optimizers=tuple(), artifact_path='checkpoints/latest.pt', map_location=None):
     import mlflow
     from mlflow.tracking.client import MlflowClient

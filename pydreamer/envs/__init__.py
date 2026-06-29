@@ -48,8 +48,9 @@ def create_env(env_id: str, no_terminal: bool, env_time_limit: int, env_action_r
         constr = lambda: MineRL(env_id, action_repeat=env_action_repeat)
         env = RestartOnExceptionWrapper(constr)
 
-    elif env_id.startswith('DistractingDMC-'):
-        from .dmc import DistractingDMC
+    elif env_id.startswith('PairedDistractingDMC-') or env_id.startswith('DistractingDMC-'):
+        from .dmc import DistractingDMC, PairedDistractingDMC
+        paired = env_id.startswith('PairedDistractingDMC-')
         # 格式: DistractingDMC-[difficulty]-[dynamic|static]-domain_task
         # 例如: DistractingDMC-easy-static-cartpole_balance
         #       DistractingDMC-easy-dynamic-cartpole_balance
@@ -79,9 +80,10 @@ def create_env(env_id: str, no_terminal: bool, env_time_limit: int, env_action_r
                 camera=getattr(conf, 'distract_camera', True),
                 color=getattr(conf, 'distract_color', True),
             )
-        env = DistractingDMC(name, action_repeat=env_action_repeat,
-                             difficulty=difficulty, dynamic=dynamic,
-                             custom_kwargs=custom_kwargs)
+        cls = PairedDistractingDMC if paired else DistractingDMC
+        env = cls(name, action_repeat=env_action_repeat,
+                  difficulty=difficulty, dynamic=dynamic,
+                  custom_kwargs=custom_kwargs)
 
     elif env_id.startswith('DMC-'):
         from .dmc import DMC

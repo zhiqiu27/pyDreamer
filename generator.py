@@ -244,13 +244,12 @@ def main(env_id='MiniGrid-MazeS11N-v0',
 
             repo = repository if (np.random.rand() > split_fraction) else repository2
             for i, data in enumerate(chunks):
-                if 'image' in data and len(data['image'].shape) == 4:
-                    # THWC => HWCT for better compression
-                    data['image_t'] = data['image'].transpose(1, 2, 3, 0)
-                    del data['image']
-                else:
-                    # Categorical image, leave it alone
-                    pass
+                # Transpose all THWC image arrays to HWCT for better compression.
+                # Handles 'image', 'image2', and any future image keys.
+                for key in [k for k in data if not k.endswith('_t') and
+                            isinstance(data[k], np.ndarray) and len(data[k].shape) == 4]:
+                    data[f'{key}_t'] = data[key].transpose(1, 2, 3, 0)
+                    del data[key]
                 repo.save_data(data, episodes - datas_episodes, episodes - 1, i)
 
             if repo == repository:

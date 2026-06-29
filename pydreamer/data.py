@@ -233,10 +233,12 @@ class DataSequential(IterableDataset):
             print(e)
             return
 
-        # Undo the transformation for better compression
-        if 'image' not in data and 'image_t' in data:
-            data['image'] = data['image_t'].transpose(3, 0, 1, 2)  # HWCT => THWC
-            del data['image_t']
+        # Undo HWCT => THWC transpose for all image keys ('image_t', 'image2_t', ...)
+        for key in [k for k in list(data.keys()) if k.endswith('_t')]:
+            base = key[:-2]  # strip '_t'
+            if base not in data:
+                data[base] = data[key].transpose(3, 0, 1, 2)
+                del data[key]
 
         if 'map_centered' in data and data['map_centered'].dtype == np.float64:
             assert False, 'Legacy, shouldnt happen anymore'  # TODO: remove

@@ -116,6 +116,25 @@ def run(conf):
     if resume_step:
         info(f'Loaded model from checkpoint epoch {resume_step}')
 
+    # Load pre-trained masker (lives in a separate MLflow run from the main training run)
+    if getattr(conf, 'use_masker', False) and model.wm.masker is not None:
+        masker_run_id = getattr(conf, 'masker_run_id', '')
+        if masker_run_id:
+            import mlflow
+            from mlflow.tracking.client import MlflowClient
+            import tempfile as _tmpfile
+            client = MlflowClient()
+            with _tmpfile.TemporaryDirectory() as tmpdir:
+                path = client.download_artifacts(masker_run_id, 'checkpoints/masker.pt', tmpdir)
+                ckpt = torch.load(path, map_location=device)
+                model.wm.masker.load_state_dict(ckpt['masker_state_dict'])
+                info(f'Loaded masker from mlflow run {masker_run_id} (epoch {ckpt["epoch"]})')
+        else:
+            info('WARNING: use_masker=True but masker_run_id not set, masker weights are random')
+    if getattr(conf, 'masker_frozen', True) and model.wm.masker is not None:
+        model.wm.masker.requires_grad_(False)
+        info('Masker frozen (excluded from optimizer updates)')
+
     # ---------------------
     # TRAINING
     # ---------------------

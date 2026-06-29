@@ -76,7 +76,8 @@ class Preprocessor:
                  map_categorical=None,
                  action_dim=0,
                  clip_rewards=None,
-                 amp=False):
+                 amp=False,
+                 paired_image=False):
         self.image_categorical = image_categorical
         self.image_key = image_key
         self.map_categorical = map_categorical
@@ -84,6 +85,7 @@ class Preprocessor:
         self.action_dim = action_dim
         self.clip_rewards = clip_rewards
         self.amp = amp
+        self.paired_image = paired_image  # also preprocess 'image2' alongside 'image'
 
     def __call__(self, dataset: IterableDataset) -> IterableDataset:
         return TransformedDataset(dataset, self.apply)
@@ -109,6 +111,12 @@ class Preprocessor:
                 batch['image'] = img_to_onehot(batch['image'], self.image_categorical)
             else:
                 batch['image'] = to_image(batch['image'])
+
+        if self.paired_image and 'image2' in batch:
+            if self.image_categorical:
+                batch['image2'] = img_to_onehot(batch['image2'], self.image_categorical)
+            else:
+                batch['image2'] = to_image(batch['image2'])
 
         # map
 
