@@ -165,9 +165,13 @@ class PairedDistractingDMC(DistractingDMC):
     The pair is pixel-identical everywhere EXCEPT the background by construction:
     both images are rendered from the SAME physics state (same qpos → same
     foreground geometry, same cam_xpos → same camera, same mat_rgba → same
-    colors); only the sky texture (SKY_TEXTURE_INDEX) is swapped between the two
-    renders. So camera/color distractions can stay ON — they are shared by both
-    views — and bg_diff = |image - image2| isolates the background alone.
+    colors); only the sky background is swapped between the two renders. So
+    camera/color distractions can stay ON — they are shared by both views — and
+    bg_diff = |image - image2| isolates the background alone.
+
+    The second background is produced by reusing the background wrapper's own
+    `_reset_background()` / `_apply()` (no direct texture-buffer access), so this
+    works regardless of the installed distracting_control version.
 
     Used by pretrain_masker.py to generate clean paired augmentation data with no
     second physics instance, no state syncing, and no foreground contamination.
@@ -179,13 +183,10 @@ class PairedDistractingDMC(DistractingDMC):
                  custom_kwargs=None):
         super().__init__(name, action_repeat, size, difficulty, dynamic,
                          background_dataset_path, custom_kwargs)
-        # The background wrapper owns the video pool and the sky texture.
+        # The background wrapper owns the video pool and the apply/upload logic.
         self._bg = self._find_bg_wrapper(self._env)
         assert self._bg is not None and self._bg._video_paths, \
             'PairedDistractingDMC needs background distraction enabled with videos'
-        self._video_alpha = (custom_kwargs or {}).get('video_alpha', 1.0)
-        self._rng2 = np.random.RandomState()   # independent sampler for the 2nd bg
-        self._tex_b = None
 
     @staticmethod
     def _find_bg_wrapper(env):
@@ -196,56 +197,29 @@ class PairedDistractingDMC(DistractingDMC):
             env = getattr(env, '_env', None)
         return None
 
-    def _sky_slice(self):
-        from distracting_control.background import SKY_TEXTURE_INDEX as I
-        m = self._env.physics.model
-        return int(m.tex_adr[I]), int(m.tex_height[I] * m.tex_width[I] * 3)
-
-    def _build_second_bg(self):
-        """Prepare a second sky texture from a different random DAVIS frame."""
-        import os
-        from pathlib import Path
-        from distracting_control import background as dcbg
-        I = dcbg.SKY_TEXTURE_INDEX
-        m = self._env.physics.model
-        adr, size = self._sky_slice()
-        h, w = int(m.tex_height[I]), int(m.tex_width[I])
-        base = dcbg.get_texture_data(m)[adr:adr + size].astype(np.float32)  # only used if alpha<1
-        video = self._rng2.choice(self._bg._video_paths)
-        frames = [p.name for p in Path(video).glob('*/')]
-        img = dcbg.imread(os.path.join(video, self._rng2.choice(frames)))
-        flat = dcbg.size_and_flatten(img, h, w)
-        self._tex_b = dcbg.blend_to_background(self._video_alpha, flat, base)
-
-    def _render_swapped(self, tex):
-        """Swap in `tex` as the sky texture, render, then restore the original."""
-        from distracting_control import background as dcbg
-        from dm_control.mujoco.wrapper import mjbindings
+    def _render_other_bg(self):
+        """Render the current physics state with a different (background B) sky,
+        then restore background A. Foreground/camera/color are untouched, so the
+        result differs from obs['image'] only in the background."""
         physics = self._env.physics
-        adr, size = self._sky_slice()
-        data = dcbg.get_texture_data(physics.model)
-        saved = data[adr:adr + size].copy()            # current background (A)
-
-        def _upload():
-            with physics.contexts.gl.make_current() as ctx:
-                ctx.call(mjbindings.mjlib.mjr_uploadTexture,
-                         physics.model.ptr, physics.contexts.mujoco.ptr,
-                         dcbg.SKY_TEXTURE_INDEX)
-
-        data[adr:adr + size] = tex
-        _upload()
+        # Snapshot the wrapper's current background (A) state.
+        saved_bg = self._bg._background
+        saved_idx = self._bg._current_img_index
+        # Sample and apply a fresh background (B) using the wrapper's own code.
+        self._bg._reset_background()
         img = physics.render(*self._size, camera_id=self._camera)
-        data[adr:adr + size] = saved                   # restore A (required in static mode)
-        _upload()
+        # Restore background A (re-apply via the wrapper's own upload path).
+        self._bg._background = saved_bg
+        self._bg._current_img_index = saved_idx
+        self._bg._apply()
         return img
 
     def reset(self):
-        obs = super().reset()                          # obs['image'] rendered with bg A
-        self._build_second_bg()                        # sample bg B for this episode
-        obs['image2'] = self._render_swapped(self._tex_b)
+        obs = super().reset()                           # obs['image'] rendered with bg A
+        obs['image2'] = self._render_other_bg()
         return obs
 
     def step(self, action):
         obs, reward, done, info = super().step(action)  # obs['image'] rendered with bg A
-        obs['image2'] = self._render_swapped(self._tex_b)
+        obs['image2'] = self._render_other_bg()
         return obs, reward, done, info
