@@ -59,14 +59,17 @@ class Dreamer(nn.Module):
         self.probe_gradients = conf.probe_gradients
 
     def init_optimizers(self, lr, lr_actor=None, lr_critic=None, eps=1e-5):
+        # Only optimize params with requires_grad=True so a frozen masker (or any other
+        # frozen submodule) is genuinely excluded from the param group.
+        wm_params = [p for p in self.wm.parameters() if p.requires_grad]
         if not self.probe_gradients:
-            optimizer_wm = torch.optim.AdamW(self.wm.parameters(), lr=lr, eps=eps)
+            optimizer_wm = torch.optim.AdamW(wm_params, lr=lr, eps=eps)
             optimizer_probe = torch.optim.AdamW(self.probe_model.parameters(), lr=lr, eps=eps)
             optimizer_actor = torch.optim.AdamW(self.ac.actor.parameters(), lr=lr_actor or lr, eps=eps)
             optimizer_critic = torch.optim.AdamW(self.ac.critic.parameters(), lr=lr_critic or lr, eps=eps)
             return optimizer_wm, optimizer_probe, optimizer_actor, optimizer_critic
         else:
-            optimizer_wmprobe = torch.optim.AdamW(self.wm.parameters(), lr=lr, eps=eps)
+            optimizer_wmprobe = torch.optim.AdamW(wm_params, lr=lr, eps=eps)
             optimizer_actor = torch.optim.AdamW(self.ac.actor.parameters(), lr=lr_actor or lr, eps=eps)
             optimizer_critic = torch.optim.AdamW(self.ac.critic.parameters(), lr=lr_critic or lr, eps=eps)
             return optimizer_wmprobe, optimizer_actor, optimizer_critic
@@ -274,7 +277,13 @@ class WorldModel(nn.Module):
                 action_dim=conf.action_dim,
                 depth=getattr(conf, 'masker_depth', 32),
                 actor_dist=conf.actor_dist,
+                inference_only=True,  # only forward()/mask_net is used here; drop aux heads
             )
+            # Freeze here (before optimizers are built) so the frozen masker params are
+            # excluded from the optimizer param group rather than relying on grad=None
+            # being skipped after the fact.
+            if getattr(conf, 'masker_frozen', True):
+                self.masker.requires_grad_(False)
         else:
             self.masker = None
 

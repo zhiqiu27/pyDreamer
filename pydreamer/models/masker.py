@@ -60,9 +60,11 @@ class ObservationMasker(nn.Module):
                  in_channels: int,
                  action_dim: int,
                  depth: int = 32,
-                 actor_dist: str = 'tanh_normal'):
+                 actor_dist: str = 'tanh_normal',
+                 inference_only: bool = False):
         super().__init__()
         self.actor_dist = actor_dist
+        self.inference_only = inference_only
 
         # --- Mask network (used in both pre-training and WorldModel) ---
         # Same-padding convs preserve spatial resolution for any H x W
@@ -80,24 +82,28 @@ class ObservationMasker(nn.Module):
         nn.init.constant_(self.mask_net[-1].bias, 2.0)
 
         # --- Auxiliary heads (pre-training only, discarded after) ---
-        self.aux_encoder = AuxEncoder(in_channels, depth)
-        aux_dim = self.aux_encoder.out_dim  # depth * 4
+        # Inside the WorldModel only forward()/mask_net is used, so build these with
+        # inference_only=False (pre-training) and skip them otherwise to avoid carrying
+        # dead parameters into every world-model checkpoint and into the optimizer.
+        if not inference_only:
+            self.aux_encoder = AuxEncoder(in_channels, depth)
+            aux_dim = self.aux_encoder.out_dim  # depth * 4
 
-        # Inverse dynamics: (feat_t, feat_t+1) -> action_t
-        self.inverse_head = nn.Sequential(
-            nn.Linear(aux_dim * 2, aux_dim),
-            nn.ELU(),
-            nn.Linear(aux_dim, action_dim),
-        )
+            # Inverse dynamics: (feat_t, feat_t+1) -> action_t
+            self.inverse_head = nn.Sequential(
+                nn.Linear(aux_dim * 2, aux_dim),
+                nn.ELU(),
+                nn.Linear(aux_dim, action_dim),
+            )
 
-        # Reward prediction: (feat_t, feat_t+1) -> reward_t+1
-        # Two frames (same as inverse dynamics) so velocity-based DMC rewards
-        # (cheetah/walker/quadruped run) are predictable, not just static-pose ones.
-        self.reward_head = nn.Sequential(
-            nn.Linear(aux_dim * 2, aux_dim),
-            nn.ELU(),
-            nn.Linear(aux_dim, 1),
-        )
+            # Reward prediction: (feat_t, feat_t+1) -> reward_t+1
+            # Two frames (same as inverse dynamics) so velocity-based DMC rewards
+            # (cheetah/walker/quadruped run) are predictable, not just static-pose ones.
+            self.reward_head = nn.Sequential(
+                nn.Linear(aux_dim * 2, aux_dim),
+                nn.ELU(),
+                nn.Linear(aux_dim, 1),
+            )
 
     # ------------------------------------------------------------------
     # WorldModel interface
@@ -150,6 +156,8 @@ class ObservationMasker(nn.Module):
             loss:    scalar
             metrics: dict of detached floats for logging
         """
+        assert not self.inference_only, \
+            'training_step requires aux heads; build ObservationMasker with inference_only=False'
         T, B, C, H, W = img_v1.shape
 
         # Apply mask (gradients flow through mask_net via all three losses)

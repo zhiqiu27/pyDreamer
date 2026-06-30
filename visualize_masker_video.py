@@ -1,0 +1,209 @@
+"""Apply a pre-trained ObservationMasker to a random-policy rollout and save
+a two-column side-by-side video: original image | mask.
+
+No bg_diff or image2 needed — mask_net predicts from a single image at
+inference (masker.forward), just like it will inside the WorldModel.
+
+Usage:
+    python visualize_masker_video.py \
+        --run_id <mlflow_run_id> \
+        --env_id DistractingDMC-easy-cheetah_run \
+        --steps 300 \
+        --out masker_video.mp4 \
+        --action_dim 6
+"""
+import argparse
+import os
+
+import numpy as np
+import torch
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+
+from pydreamer.models.masker import ObservationMasker
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def load_masker_checkpoint(run_id, artifact_path, map_location):
+    """Download the masker checkpoint of an MLflow run by its run id and load it."""
+    import tempfile
+    from mlflow.tracking.client import MlflowClient
+    client = MlflowClient()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = client.download_artifacts(run_id, artifact_path, tmpdir)
+        return torch.load(path, map_location=map_location, weights_only=False)
+
+def make_env(env_id, action_repeat=2, dynamic=True,
+             bg_path='/home/csy24/DAVIS/JPEGImages/480p/'):
+    """Create a DistractingDMC (or plain DMC) environment.
+
+    dynamic=True: background video advances each step (moving background).
+    dynamic=False: background is fixed per episode (static).
+    """
+    from pydreamer.envs.dmc import DistractingDMC, DMC
+    if env_id.startswith('DistractingDMC-'):
+        parts = env_id.split('-', maxsplit=3)
+        difficulty = 'easy'
+        name = parts[-1].lower()
+        for tok in parts[1:-1]:
+            if tok in ('easy', 'medium', 'hard'):
+                difficulty = tok
+        return DistractingDMC(name, action_repeat=action_repeat,
+                              difficulty=difficulty, dynamic=dynamic,
+                              background_dataset_path=bg_path)
+    elif env_id.startswith('DMC-'):
+        return DMC(env_id.split('-', 1)[1].lower(), action_repeat=action_repeat)
+    else:
+        raise ValueError(f'Unsupported env_id: {env_id}')
+
+
+def preprocess_frame(img_uint8, device):
+    """uint8 (H,W,C) -> float tensor (1,1,C,H,W) in [-0.5, 0.5]."""
+    x = img_uint8.astype(np.float32) / 255.0 - 0.5
+    x = x.transpose(2, 0, 1)[None, None]           # (1,1,C,H,W)
+    return torch.from_numpy(x).to(device)
+
+
+def to_display(tensor_chw):
+    """float (C,H,W) in [-0.5,0.5] -> uint8 (H,W,C) in [0,255]."""
+    arr = tensor_chw.cpu().numpy().transpose(1, 2, 0)
+    return (np.clip(arr + 0.5, 0, 1) * 255).astype(np.uint8)
+
+
+def mask_to_display(mask_1hw):
+    """float mask (1,H,W) in [0,1] -> uint8 RGB heatmap (H,W,3)."""
+    m = mask_1hw[0].cpu().numpy()                   # (H, W)
+    cmap = plt.get_cmap('viridis')
+    rgb = (cmap(m)[:, :, :3] * 255).astype(np.uint8)
+    return rgb
+
+
+def save_video(frames, path, fps=20):
+    """Save list of (H,W,3) uint8 arrays as mp4 via imageio."""
+    try:
+        import imageio
+        writer = imageio.get_writer(path, fps=fps)
+        for f in frames:
+            writer.append_data(f)
+        writer.close()
+        return True
+    except Exception as e:
+        print(f'[imageio] {e}')
+        return False
+
+
+def save_frames(frames, path):
+    """Fall-back: save a montage PNG (one row per frame sampled evenly)."""
+    import math
+    n = min(12, len(frames))
+    idx = np.linspace(0, len(frames) - 1, n, dtype=int)
+    cols = 4
+    rows = math.ceil(n / cols)
+    H, W = frames[0].shape[:2]
+    canvas = np.zeros((rows * H, cols * W, 3), dtype=np.uint8)
+    for k, i in enumerate(idx):
+        r, c = divmod(k, cols)
+        canvas[r*H:(r+1)*H, c*W:(c+1)*W] = frames[i]
+    plt.imsave(path, canvas)
+    return path
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--run_id', required=True,
+                   help='MLflow run id; the masker checkpoint is loaded from its artifacts')
+    p.add_argument('--artifact_path', default='checkpoints/masker.pt',
+                   help='artifact path of the masker checkpoint within the run')
+    p.add_argument('--env_id', default='DistractingDMC-easy-cheetah_run')
+    p.add_argument('--steps', type=int, default=300)
+    p.add_argument('--action_dim', type=int, default=6)
+    p.add_argument('--masker_depth', type=int, default=32)
+    p.add_argument('--actor_dist', default='tanh_normal')
+    p.add_argument('--action_repeat', type=int, default=2)
+    p.add_argument('--dynamic', type=lambda x: x.lower() != 'false', default=True,
+                   help='dynamic background (default True — background moves each step)')
+    p.add_argument('--bg_path', default='/home/csy24/DAVIS/JPEGImages/480p/')
+    p.add_argument('--fps', type=int, default=20)
+    p.add_argument('--out', default='masker_video.mp4')
+    p.add_argument('--device', default='cpu')
+    args = p.parse_args()
+
+    device = torch.device(args.device)
+
+    # ── load masker ──────────────────────────────────────────────────────────
+    ckpt = load_masker_checkpoint(args.run_id, args.artifact_path, map_location=device)
+    masker = ObservationMasker(
+        in_channels=3, action_dim=args.action_dim,
+        depth=args.masker_depth, actor_dist=args.actor_dist,
+    ).to(device)
+    masker.load_state_dict(ckpt['masker_state_dict'])
+    masker.eval()
+    step_loaded = ckpt.get('epoch', '?')
+    print(f'Loaded masker (step {step_loaded}) from run {args.run_id} ({args.artifact_path})')
+
+    # ── create env ───────────────────────────────────────────────────────────
+    print(f'Creating env: {args.env_id}  dynamic={args.dynamic}')
+    env = make_env(args.env_id, action_repeat=args.action_repeat,
+                   dynamic=args.dynamic, bg_path=args.bg_path)
+    action_space = env.action_space
+
+    # ── rollout ──────────────────────────────────────────────────────────────
+    obs = env.reset()
+    composite_frames = []   # side-by-side (H, 2*W, 3) uint8 frames
+
+    print(f'Running {args.steps} steps with random policy ...')
+    for step in range(args.steps):
+        img_u8 = obs['image']                           # (H, W, C) uint8
+
+        # Masker inference — single image, no image2 needed
+        with torch.no_grad():
+            x = preprocess_frame(img_u8, device)        # (1,1,C,H,W)
+            masked, mask = masker(x)                    # (1,1,C,H,W), (1,1,1,H,W)
+
+        orig_rgb  = img_u8                              # (H, W, 3) uint8
+        mask_rgb  = mask_to_display(mask[0, 0])        # (H, W, 3) viridis heatmap
+
+        side_by_side = np.concatenate([orig_rgb, mask_rgb], axis=1)  # (H, 2W, 3)
+        composite_frames.append(side_by_side)
+
+        action = action_space.sample()
+        obs, _, done, _ = env.step(action)
+        if done:
+            obs = env.reset()
+
+        if (step + 1) % 50 == 0:
+            print(f'  step {step+1}/{args.steps}  mask_mean={mask.mean():.3f}')
+
+    print(f'Collected {len(composite_frames)} frames, saving ...')
+
+    # ── save ──────────────────────────────────────────────────────────────────
+    ext = os.path.splitext(args.out)[-1].lower()
+    if ext in ('.mp4', '.gif', '.avi'):
+        ok = save_video(composite_frames, args.out, fps=args.fps)
+        if not ok:
+            fallback = args.out.replace(ext, '_montage.png')
+            save_frames(composite_frames, fallback)
+            print(f'imageio failed — saved montage to {fallback}')
+        else:
+            print(f'Saved video: {args.out}  ({len(composite_frames)} frames @ {args.fps} fps)')
+    else:
+        save_frames(composite_frames, args.out)
+        print(f'Saved montage: {args.out}')
+
+    # print a quick mask stats summary
+    means = [f[..., :].mean() for f in composite_frames[:10]]   # rough
+    masks_np = np.stack([
+        plt.get_cmap('viridis')(np.zeros((1,1)))[..., :3]  # dummy
+        for _ in composite_frames
+    ])
+    print('Done.')
+
+
+if __name__ == '__main__':
+    main()

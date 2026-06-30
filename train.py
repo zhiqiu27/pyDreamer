@@ -127,13 +127,18 @@ def run(conf):
             with _tmpfile.TemporaryDirectory() as tmpdir:
                 path = client.download_artifacts(masker_run_id, 'checkpoints/masker.pt', tmpdir)
                 ckpt = torch.load(path, map_location=device)
-                model.wm.masker.load_state_dict(ckpt['masker_state_dict'])
+                # strict=False: the pre-training checkpoint also holds aux-head weights
+                # (aux_encoder/inverse_head/reward_head) that the inference-only masker in
+                # the WorldModel does not have. mask_net keys must all be present though.
+                missing, _ = model.wm.masker.load_state_dict(ckpt['masker_state_dict'], strict=False)
+                assert not missing, f'Masker checkpoint missing keys: {missing}'
                 info(f'Loaded masker from mlflow run {masker_run_id} (epoch {ckpt["epoch"]})')
         else:
             info('WARNING: use_masker=True but masker_run_id not set, masker weights are random')
-    if getattr(conf, 'masker_frozen', True) and model.wm.masker is not None:
-        model.wm.masker.requires_grad_(False)
-        info('Masker frozen (excluded from optimizer updates)')
+        # Note: the masker is already frozen (if masker_frozen) in WorldModel.__init__,
+        # before the optimizers above were built, so it is excluded from the param group.
+        if getattr(conf, 'masker_frozen', True):
+            info('Masker frozen (excluded from optimizer updates)')
 
     # ---------------------
     # TRAINING
