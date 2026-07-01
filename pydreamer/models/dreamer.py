@@ -372,6 +372,7 @@ class WorldModel(nn.Module):
 
         loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs_enc)
         if mask is not None:
+            tensors['image_masked'] = masked_image.detach()
             tensors['mask'] = mask.detach()
 
         # KL loss

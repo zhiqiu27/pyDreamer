@@ -15,6 +15,7 @@ def make_video(npz_path, out_path, batch_idx=0, fps=10):
     data = np.load(npz_path)
 
     image = data['image'][batch_idx]        # (T, H, W, 3)  real frames
+    image_masked = data.get('image_masked') # masked input image
     image_rec = data.get('image_rec')       # reconstruction (closed-loop only)
     image_pred = data.get('image_pred')     # open-loop prediction
 
@@ -22,6 +23,8 @@ def make_video(npz_path, out_path, batch_idx=0, fps=10):
     T = image.shape[0]
     for t in range(T):
         cols = [image[t]]
+        if image_masked is not None:
+            cols.append(image_masked[batch_idx, t])
         if image_rec is not None:
             cols.append(image_rec[batch_idx, t])
         if image_pred is not None:
@@ -37,6 +40,8 @@ def make_video(npz_path, out_path, batch_idx=0, fps=10):
 
     # Add header label
     labels = ['real']
+    if image_masked is not None:
+        labels.append('masked')
     if image_rec is not None:
         labels.append('reconstruct')
     if image_pred is not None:
