@@ -13,10 +13,14 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.profiler import ProfilerActivity
 from torch.utils.data import DataLoader
 
+from multiprocessing import Process
+
+import generator as generator_module
 from pydreamer import tools
 from pydreamer.data import DataSequential, MlflowEpisodeRepository
 from pydreamer.models import *
 from pydreamer.models.functions import map_structure, nanmean
+from pydreamer.models.masker import ObservationMasker
 from pydreamer.preprocessing import Preprocessor, WorkerInfoPreprocess
 from pydreamer.tools import *
 
@@ -117,8 +121,9 @@ def run(conf):
         info(f'Loaded model from checkpoint epoch {resume_step}')
 
     # Load pre-trained masker (lives in a separate MLflow run from the main training run)
+    masker_run_id = getattr(conf, 'masker_run_id', '')
+    masker_full_sd = None  # full pre-training state_dict (mask_net + aux heads), reused for refresh
     if getattr(conf, 'use_masker', False) and model.wm.masker is not None:
-        masker_run_id = getattr(conf, 'masker_run_id', '')
         if masker_run_id:
             import mlflow
             from mlflow.tracking.client import MlflowClient
@@ -127,10 +132,11 @@ def run(conf):
             with _tmpfile.TemporaryDirectory() as tmpdir:
                 path = client.download_artifacts(masker_run_id, 'checkpoints/masker.pt', tmpdir)
                 ckpt = torch.load(path, map_location=device)
+                masker_full_sd = ckpt['masker_state_dict']
                 # strict=False: the pre-training checkpoint also holds aux-head weights
-                # (aux_encoder/inverse_head/reward_head) that the inference-only masker in
-                # the WorldModel does not have. mask_net keys must all be present though.
-                missing, _ = model.wm.masker.load_state_dict(ckpt['masker_state_dict'], strict=False)
+                # (aux_encoder/inverse_head) that the inference-only masker in the
+                # WorldModel does not have. mask_net keys must all be present though.
+                missing, _ = model.wm.masker.load_state_dict(masker_full_sd, strict=False)
                 assert not missing, f'Masker checkpoint missing keys: {missing}'
                 info(f'Loaded masker from mlflow run {masker_run_id} (epoch {ckpt["epoch"]})')
         else:
@@ -139,6 +145,42 @@ def run(conf):
         # before the optimizers above were built, so it is excluded from the param group.
         if getattr(conf, 'masker_frozen', True):
             info('Masker frozen (excluded from optimizer updates)')
+
+    # Persistent trainable masker for periodic on-policy refresh.
+    # It lives outside `model` (own aux heads + own optimizer) and its mask_net is
+    # copied into the frozen model.wm.masker at each sync, so the world-model masker
+    # co-evolves with the policy without ever entering the main optimizer.
+    masker_trainer = None
+    masker_opt = None
+    masker_pretrain_dirs = []
+    masker_collect = None  # in-flight paired-collection state, or None when idle
+    if getattr(conf, 'use_masker', False) and getattr(conf, 'masker_refresh', False) and model.wm.masker is not None:
+        if not getattr(conf, 'masker_frozen', True):
+            warning('masker_refresh=True but masker_frozen=False: the world-model masker is in the '
+                    'main optimizer, so periodic sync will fight gradient updates. Set masker_frozen=True.')
+        masker_trainer = ObservationMasker(
+            in_channels=conf.image_channels,
+            action_dim=conf.action_dim,
+            depth=getattr(conf, 'masker_depth', 32),
+            actor_dist=conf.actor_dist,
+            inference_only=False,  # keep aux heads so training_step() works
+        ).to(device)
+        if masker_full_sd is not None:
+            masker_trainer.load_state_dict(masker_full_sd)  # full: mask_net + aux heads (warm-started)
+        masker_opt = torch.optim.AdamW(masker_trainer.parameters(),
+                                       lr=getattr(conf, 'masker_refresh_lr', 1e-4),
+                                       eps=conf.adam_eps)
+        # Pre-training paired data, mixed in during fine-tune to avoid forgetting broad coverage.
+        if getattr(conf, 'masker_refresh_mix_pretrain', True) and masker_run_id:
+            try:
+                from mlflow.tracking.client import MlflowClient
+                pre_uri = MlflowClient().get_run(masker_run_id).info.artifact_uri
+                masker_pretrain_dirs = [f'{pre_uri}/episodes/{i}' for i in range(conf.generator_workers)]
+            except Exception as e:
+                warning(f'Masker refresh: could not resolve pre-training paired dirs: {repr(e)}')
+        info(f'Masker periodic refresh enabled '
+             f'(every {conf.masker_refresh_every_ckpt} ckpts, collect {conf.masker_refresh_collect_steps} steps, '
+             f'finetune {conf.masker_refresh_train_steps} steps @ lr {getattr(conf, "masker_refresh_lr", 1e-4)})')
 
     # ---------------------
     # TRAINING
@@ -288,6 +330,14 @@ def run(conf):
                     if steps % conf.save_interval == 0:
                         tools.mlflow_save_checkpoint(model, optimizers, steps)
                         info(f'Saved model checkpoint {steps}')
+
+                    # Masker periodic refresh: collect on-policy paired data in the
+                    # background, then fine-tune the masker and sync it in-place.
+
+                    if masker_trainer is not None:
+                        masker_collect = masker_refresh_step(
+                            conf, steps, artifact_uri, device, model,
+                            masker_trainer, masker_opt, masker_pretrain_dirs, masker_collect)
 
                     # Stop
 
@@ -490,6 +540,149 @@ def prepare_batch_npz(data: Dict[str, Tensor], take_b=999):
         return x
 
     return {k: v for k, v in ((k, unpreprocess(k, v)) for k, v in data.items()) if v is not None}
+
+
+def masker_refresh_step(conf, steps, artifact_uri, device, model,
+                        masker_trainer, masker_opt, pretrain_dirs, collect):
+    """Non-blocking state machine driving one on-policy masker refresh.
+
+    Idle -> (refresh due) spawn paired generators and return collection state.
+    Collecting -> poll accumulated steps; once the target is reached (or the
+    generators exit), fine-tune the masker, sync it into the world model, and
+    return to idle (None). The learner keeps training throughout collection;
+    only the short fine-tune pauses it.
+    """
+    if collect is None:
+        due = (steps >= conf.masker_refresh_after_steps and
+               steps % (conf.save_interval * conf.masker_refresh_every_ckpt) == 0)
+        if due:
+            collect = _masker_start_collect(conf, artifact_uri, steps)
+            info(f'[masker] started paired collection at step {steps} '
+                 f'(target {conf.masker_refresh_collect_steps} steps)')
+        return collect
+
+    # Collection in flight - poll only occasionally (listing the repo is not free).
+    if steps % conf.log_interval != 0:
+        return collect
+
+    collected = DataSequential(MlflowEpisodeRepository(collect['dirs']),
+                               conf.batch_length, conf.batch_size,
+                               check_nonempty=False).stats_steps
+    alive = any(p.is_alive() for p in collect['procs'])
+    if collected < conf.masker_refresh_collect_steps and alive:
+        debug(f'[masker] collecting {collected}/{conf.masker_refresh_collect_steps}')
+        return collect
+
+    for p in collect['procs']:
+        if p.is_alive():
+            p.kill()
+    if collected <= 0:
+        warning('[masker] no paired data collected; skipping this refresh')
+        return None
+
+    _masker_finetune(conf, device, model, masker_trainer, masker_opt,
+                     collect['dirs'], pretrain_dirs, steps)
+    info(f'[masker] fine-tuned {conf.masker_refresh_train_steps} steps and synced '
+         f'at step {steps} ({collected} paired steps collected)')
+    return None
+
+
+def _masker_start_collect(conf, artifact_uri, steps):
+    # Unique dirs per burst: the generator compares num_steps against the steps
+    # already saved in its save_uri, so reusing a dir across bursts would make
+    # every generator after the first exit immediately with nothing collected.
+    # Fresh dirs also mean the fine-tune below sees only this burst's on-policy data.
+    dirs = [f'{artifact_uri}/episodes_masker/{steps:07}_{i}'
+            for i in range(conf.masker_refresh_workers)]
+    procs = []
+    for i in range(conf.masker_refresh_workers):
+        p = Process(
+            target=generator_module.main,
+            daemon=True,
+            kwargs=dict(
+                env_id=conf.masker_env_id or conf.env_id,
+                save_uri=dirs[i],
+                worker_id=900 + i,  # keep clear of the main generator worker ids
+                policy_main='network',    # current policy+masker from latest.pt
+                policy_prefill='network',
+                # Per-worker share of the target: dirs start empty, so the generator
+                # exits on its own once its share is saved (kill is only a fallback).
+                num_steps=max(1, conf.masker_refresh_collect_steps // conf.masker_refresh_workers),
+                num_steps_prefill=0,
+                env_time_limit=conf.env_time_limit,
+                env_action_repeat=conf.env_action_repeat,
+                env_no_terminal=conf.env_no_terminal,
+                model_conf=conf,
+                log_mlflow_metrics=False,
+            ),
+        )
+        p.start()
+        procs.append(p)
+    return dict(procs=procs, dirs=dirs)
+
+
+def _masker_finetune(conf, device, model, masker_trainer, masker_opt,
+                     collect_dirs, pretrain_dirs, steps):
+    data_dirs = list(collect_dirs)
+    if getattr(conf, 'masker_refresh_mix_pretrain', True) and pretrain_dirs:
+        data_dirs = data_dirs + list(pretrain_dirs)
+    data = DataSequential(MlflowEpisodeRepository(data_dirs),
+                          conf.batch_length,
+                          conf.batch_size,
+                          skip_first=True,
+                          buffer_size=conf.buffer_size,
+                          reset_interval=conf.reset_interval)
+    preprocess = Preprocessor(
+        image_categorical=conf.image_channels if conf.image_categorical else None,
+        image_key=conf.image_key,
+        map_categorical=conf.map_channels if conf.map_categorical else None,
+        map_key=conf.map_key,
+        action_dim=conf.action_dim,
+        clip_rewards=conf.clip_rewards,
+        paired_image=True,  # need 'image2' for background-contrast supervision
+    )
+    data_iter = iter(DataLoader(preprocess(data), batch_size=None, num_workers=0))
+
+    masker_trainer.train()
+    log = defaultdict(list)
+    for _ in range(conf.masker_refresh_train_steps):
+        batch = next(data_iter)
+        img_v1 = batch['image'].to(device)
+        img_v2 = batch['image2'].to(device)
+        action = batch['action'].to(device)
+        reset = batch['reset'].to(device)
+        loss, metrics = masker_trainer.training_step(
+            img_v1, img_v2, action, reset,
+            weight_bg=getattr(conf, 'masker_weight_bg', 1.0),
+            weight_inv=getattr(conf, 'masker_weight_inv', 1.0),
+            mask_temp=getattr(conf, 'masker_mask_temp', 0.5),
+        )
+        masker_opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(masker_trainer.parameters(), conf.grad_clip)
+        masker_opt.step()
+        for k, v in metrics.items():
+            log[k].append(v.item())
+
+    # Sync the refined mask_net into the frozen world-model masker, in place.
+    # requires_grad is untouched (stays frozen), and the masker is not in any
+    # optimizer, so no optimizer state has to change.
+    ema = getattr(conf, 'masker_refresh_ema', 0.0)
+    with torch.no_grad():
+        src_sd = masker_trainer.mask_net.state_dict()
+        dst = model.wm.masker.mask_net
+        if ema and ema > 0.0:
+            dst_sd = dst.state_dict()
+            for k in dst_sd:
+                dst_sd[k].mul_(1.0 - ema).add_(src_sd[k].to(dst_sd[k].device), alpha=ema)
+        else:
+            dst.load_state_dict(src_sd)
+
+    # Archive the full masker (mask_net + warm aux heads) into the main run.
+    tools.mlflow_save_masker_checkpoint(masker_trainer, steps)
+    metrics_log = {f'masker_refresh/{k}': np.mean(v) for k, v in log.items()}
+    metrics_log['_timestamp'] = datetime.now().timestamp()
+    mlflow_log_metrics(metrics_log, step=steps)
 
 
 def get_profiler(conf):

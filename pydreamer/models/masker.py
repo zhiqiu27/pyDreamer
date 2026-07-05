@@ -9,7 +9,7 @@ from .functions import *
 
 
 class AuxEncoder(nn.Module):
-    """Small CNN encoder shared by inverse dynamics and reward heads during pre-training."""
+    """Small CNN encoder feeding the inverse dynamics head during pre-training."""
 
     def __init__(self, in_channels: int, depth: int = 32):
         super().__init__()
@@ -38,7 +38,6 @@ class ObservationMasker(nn.Module):
       1. Background contrast: mask should be HIGH where pixel diff between two
          differently-backgrounded versions of the same frame is LOW (foreground).
       2. Inverse dynamics: masked images at (t, t+1) should predict action_t+1.
-      3. Reward prediction: masked images at (t, t+1) should predict reward_t+1.
 
     WorldModel usage (forward only):
         masked_image, mask = masker(obs['image'])
@@ -96,15 +95,6 @@ class ObservationMasker(nn.Module):
                 nn.Linear(aux_dim, action_dim),
             )
 
-            # Reward prediction: (feat_t, feat_t+1) -> reward_t+1
-            # Two frames (same as inverse dynamics) so velocity-based DMC rewards
-            # (cheetah/walker/quadruped run) are predictable, not just static-pose ones.
-            self.reward_head = nn.Sequential(
-                nn.Linear(aux_dim * 2, aux_dim),
-                nn.ELU(),
-                nn.Linear(aux_dim, 1),
-            )
-
     # ------------------------------------------------------------------
     # WorldModel interface
     # ------------------------------------------------------------------
@@ -135,12 +125,9 @@ class ObservationMasker(nn.Module):
                       img_v1: Tensor,
                       img_v2: Tensor,
                       action: Tensor,
-                      reward: Tensor,
                       reset: Tensor,
                       weight_bg: float = 1.0,
                       weight_inv: float = 1.0,
-                      weight_reward: float = 1.0,
-                      weight_coverage: float = 0.1,
                       mask_temp: float = 0.5,
                       ) -> Tuple[Tensor, Dict]:
         """
@@ -149,7 +136,6 @@ class ObservationMasker(nn.Module):
             img_v2:  (T, B, C, H, W)  augmented version 2 (different background,
                                        same foreground/state as img_v1)
             action:  (T, B, A)         one-hot or continuous action taken at each step
-            reward:  (T, B)            reward received at each step
             reset:   (T, B)            episode boundary flags (bool/float)
 
         Returns:
@@ -170,7 +156,7 @@ class ObservationMasker(nn.Module):
         #
         # Why not the old force-balance ((mask*bg_diff) down + coverage up)? A
         # multiplicative soft mask is scale-degenerate: a uniform small mask keeps
-        # all information (encoder just rescales), so inverse/reward cannot localize
+        # all information (encoder just rescales), so inverse cannot localize
         # or hold the mask up, and coverage is uniform — the only localizing signal
         # is bg_diff, and under area-dominant backgrounds the CNN collapses to a
         # uniform tiny mask. A direct localized target cannot collapse to a uniform
@@ -200,20 +186,11 @@ class ObservationMasker(nn.Module):
         else:
             loss_inv = F.mse_loss(action_pred, action_target)
 
-        # --- Loss 3: reward prediction (two frames, same alignment as inverse) ---
-        # reward[t+1] is the reward of the transition (o_t -> o_t+1), predicted
-        # from the same (feat_t, feat_t+1) pair, with the same boundary mask.
-        reward_pred = self.reward_head(torch.cat([feat_t, feat_t1], dim=-1)).squeeze(-1)  # (N,)
-        reward_target = reward[1:][valid]                                                  # (N,)
-        loss_reward = F.mse_loss(reward_pred, reward_target)
-
         # --- Total ---
-        # weight_bg now weights the (supervised) mask loss. inverse/reward are
-        # auxiliary: they ground the aux_encoder but cannot localize the mask, so
-        # they can be set to 0 for a pure mask-localization sanity check.
-        loss = (weight_bg     * loss_mask
-              + weight_inv    * loss_inv
-              + weight_reward * loss_reward)
+        # weight_bg weights the (supervised) mask loss. inverse is auxiliary: it
+        # grounds the aux_encoder but cannot localize the mask, so it can be set to
+        # 0 for a pure mask-localization sanity check.
+        loss = weight_bg * loss_mask + weight_inv * loss_inv
 
         with torch.no_grad():
             # mask averaged over background vs foreground regions (bg_diff above/below
@@ -227,7 +204,6 @@ class ObservationMasker(nn.Module):
             'loss_masker':   loss.detach(),
             'loss_mask':     loss_mask.detach(),
             'loss_inv':      loss_inv.detach(),
-            'loss_reward':   loss_reward.detach(),
             'mask_mean':     mask.detach().mean(),
             'mask_std':      mask.detach().std(),
             'mask_bg':       mask_bg,          # should -> 0 (background suppressed)

@@ -116,6 +116,9 @@ def wandb_init(conf=None):
         import wandb
         if wandb.run is not None:
             return
+        # Don't upload system metrics (GPU/CPU/RAM/disk/network under wandb's "System"
+        # tab). setdefault so an explicit env override still wins.
+        os.environ.setdefault('WANDB_DISABLE_STATS', 'true')
         run_id = os.environ.get('WANDB_RUN_ID')
         project = os.environ.get('WANDB_PROJECT', 'pydreamer')
         # Use MLflow run name or custom WANDB_NAME for the run name
