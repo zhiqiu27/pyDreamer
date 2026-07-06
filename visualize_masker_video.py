@@ -37,12 +37,35 @@ def load_masker_checkpoint(run_id, artifact_path, map_location):
         path = client.download_artifacts(run_id, artifact_path, tmpdir)
         return torch.load(path, map_location=map_location, weights_only=False)
 
+def load_custom_kwargs(distract_config='config/distract.yaml'):
+    """Read the fine-grained distraction params from config/distract.yaml,
+    mirroring what create_env() builds for difficulty=custom."""
+    import yaml
+    with open(distract_config) as f:
+        cfg = yaml.safe_load(f) or {}
+    d = cfg.get('distract', cfg)  # support both nested and flat layouts
+    return dict(
+        scale=d.get('distract_scale', 0.1),
+        num_videos=d.get('distract_num_videos', 4),
+        video_alpha=d.get('distract_video_alpha', 1.0),
+        ground_alpha=d.get('distract_ground_alpha', 1.0),
+        background=d.get('distract_background', True),
+        camera=d.get('distract_camera', True),
+        color=d.get('distract_color', True),
+    )
+
+
 def make_env(env_id, action_repeat=2, dynamic=True,
-             bg_path='/home/csy24/DAVIS/JPEGImages/480p/'):
+             bg_path='/home/csy24/DAVIS/JPEGImages/480p/',
+             distract_config='config/distract.yaml'):
     """Create a DistractingDMC (or plain DMC) environment.
 
     dynamic=True: background video advances each step (moving background).
     dynamic=False: background is fixed per episode (static).
+
+    difficulty=custom (env_id like DistractingDMC-custom-static-cheetah_run)
+    reads fine-grained params from config/distract.yaml, matching create_env().
+    A static/dynamic token in env_id overrides the `dynamic` argument.
     """
     from pydreamer.envs.dmc import DistractingDMC, DMC
     if env_id.startswith('DistractingDMC-'):
@@ -50,11 +73,17 @@ def make_env(env_id, action_repeat=2, dynamic=True,
         difficulty = 'easy'
         name = parts[-1].lower()
         for tok in parts[1:-1]:
-            if tok in ('easy', 'medium', 'hard'):
+            if tok in ('easy', 'medium', 'hard', 'custom'):
                 difficulty = tok
+            elif tok == 'dynamic':
+                dynamic = True
+            elif tok == 'static':
+                dynamic = False
+        custom_kwargs = load_custom_kwargs(distract_config) if difficulty == 'custom' else None
         return DistractingDMC(name, action_repeat=action_repeat,
                               difficulty=difficulty, dynamic=dynamic,
-                              background_dataset_path=bg_path)
+                              background_dataset_path=bg_path,
+                              custom_kwargs=custom_kwargs)
     elif env_id.startswith('DMC-'):
         return DMC(env_id.split('-', 1)[1].lower(), action_repeat=action_repeat)
     else:
@@ -129,6 +158,8 @@ def main():
     p.add_argument('--dynamic', type=lambda x: x.lower() != 'false', default=True,
                    help='dynamic background (default True — background moves each step)')
     p.add_argument('--bg_path', default='/home/csy24/DAVIS/JPEGImages/480p/')
+    p.add_argument('--distract_config', default='config/distract.yaml',
+                   help='config with fine-grained distraction params (used when env_id difficulty=custom)')
     p.add_argument('--fps', type=int, default=20)
     p.add_argument('--out', default='masker_video.mp4')
     p.add_argument('--device', default='cpu')
@@ -150,7 +181,8 @@ def main():
     # ── create env ───────────────────────────────────────────────────────────
     print(f'Creating env: {args.env_id}  dynamic={args.dynamic}')
     env = make_env(args.env_id, action_repeat=args.action_repeat,
-                   dynamic=args.dynamic, bg_path=args.bg_path)
+                   dynamic=args.dynamic, bg_path=args.bg_path,
+                   distract_config=args.distract_config)
     action_space = env.action_space
 
     # ── rollout ──────────────────────────────────────────────────────────────
@@ -167,9 +199,11 @@ def main():
             masked, mask = masker(x)                    # (1,1,C,H,W), (1,1,1,H,W)
 
         orig_rgb  = img_u8                              # (H, W, 3) uint8
-        mask_rgb  = mask_to_display(mask[0, 0])        # (H, W, 3) viridis heatmap
+        m         = mask[0, 0, 0].cpu().numpy()        # (H, W) in [0, 1]
+        # Zero out the background: mask≈0 -> black, mask≈1 -> original pixel.
+        masked_rgb = (orig_rgb.astype(np.float32) * m[..., None]).astype(np.uint8)
 
-        side_by_side = np.concatenate([orig_rgb, mask_rgb], axis=1)  # (H, 2W, 3)
+        side_by_side = np.concatenate([orig_rgb, masked_rgb], axis=1)  # (H, 2W, 3)
         composite_frames.append(side_by_side)
 
         action = action_space.sample()

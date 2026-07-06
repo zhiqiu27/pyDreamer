@@ -12,8 +12,8 @@
 #   - Reference presets: scale  easy=0.1 / medium=0.2 / hard=0.3
 #                        num_videos  easy=4 / medium=8 / hard=all
 distract:
-  distract_scale: 0.1          # camera + color distraction strength (0~1, larger = stronger)
-  distract_num_videos: 4       # number of background videos (0 = use all videos in dataset)
+  distract_scale: 0.2          # camera + color distraction strength (0~1, larger = stronger)
+  distract_num_videos: 0       # number of background videos (0 = use all videos in dataset)
   distract_video_alpha: 1.0    # background video opacity (1.0 = fully replace background, 0 = none)
   distract_ground_alpha: 1.0   # ground plane opacity
   distract_background: True    # enable background video distraction

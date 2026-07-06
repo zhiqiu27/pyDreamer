@@ -95,7 +95,7 @@ defaults:
   masker_train_steps: 50_000      # gradient steps to train masker
   masker_weight_bg: 1.0           # direct mask supervision (BCE to foreground target) weight
   masker_weight_inv: 1.0          # inverse dynamics loss weight
-  masker_mask_temp: 0.5           # temperature for exp(-bg_diff/temp) foreground target (smaller=sharper)
+  masker_mask_temp: 0.25           # temperature for exp(-bg_diff/temp) foreground target (smaller=sharper)
 
   # Periodic on-policy masker refresh (co-evolve the frozen masker with the policy during main training)
   masker_refresh: False                 # enable periodic refresh; requires use_masker=True
@@ -110,7 +110,7 @@ defaults:
 
   # Inverse dynamics head (auxiliary representation loss on encoder embedding)
   use_inverse_head: False
-  inverse_head_weight: 3.0
+  inverse_head_weight: 0.0
 
   # Probe
   probe_model: none
@@ -233,7 +233,7 @@ dmc:
   action_dim: 12
   env_time_limit: 500  # =1000/action_repeat
   env_action_repeat: 2
-  generator_workers: 2
+  generator_workers: 1
   generator_prefill_steps: 5000
   entropy: 1.0e-4
   actor_grad: dynamics
