@@ -130,6 +130,7 @@ class ObservationMasker(nn.Module):
                       weight_bg: float = 1.0,
                       weight_inv: float = 1.0,
                       mask_temp: float = 0.5,
+                      mask_dilate: int = 3,
                       ) -> Tuple[Tensor, Dict]:
         """
         Args:
@@ -167,6 +168,16 @@ class ObservationMasker(nn.Module):
             bg_diff = (img_v1 - img_v2).abs().mean(dim=2, keepdim=True)  # (T, B, 1, H, W)
             bg_diff = bg_diff / (bg_diff.mean() + 1e-6)                  # normalize, scale ~1
             fg_target = torch.exp(-bg_diff / mask_temp)                  # 1 on fg, ->0 on bg
+            if mask_dilate > 1:
+                # Morphological dilation of the target: thin foreground (e.g. a 2-3 px
+                # pole) is almost all anti-aliased edge pixels whose colors blend the
+                # two different backgrounds, so their bg_diff is spuriously high and
+                # their target spuriously gray. Max-pooling lets those edge pixels
+                # inherit the near-1 target of the pure-foreground pixels next to them.
+                # mask_dilate must be odd (3 = grow by 1 px, 5 = by 2 px).
+                fg_target = F.max_pool2d(fg_target.reshape(T * B, 1, H, W),
+                                         mask_dilate, 1, mask_dilate // 2
+                                         ).reshape(T, B, 1, H, W)
         mask_c = mask.clamp(1e-4, 1 - 1e-4)
         loss_mask = F.binary_cross_entropy(mask_c, fg_target)
 
