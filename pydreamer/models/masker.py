@@ -41,11 +41,12 @@ class ObservationMasker(nn.Module):
 
     WorldModel usage (forward only):
         masked_image, mask = masker(obs['image'])
-        # masked_image -> encoder (and decoder reconstruction target)
-        # mask         -> logged as tensor for visualization
+        # masked_image -> encoder input
+        # mask         -> per-pixel weight on the decoder reconstruction loss
+        #                 (masker_weighted_recon; the decoder targets the RAW image,
+        #                  high mask = pixel error matters more), and logged for viz
 
-    After pre-training the mask is frozen and also used as spatial weights
-    on the decoder reconstruction loss (high mask = pixel matters more).
+    After pre-training the mask is frozen inside the WorldModel.
 
     Args:
         in_channels: image channels after preprocessing (e.g. 3 for RGB DMC)

@@ -50,14 +50,23 @@ class MultiDecoder(nn.Module):
     def training_step(self,
                       features: TensorTBIF,
                       obs: Dict[str, Tensor],
-                      extra_metrics: bool = False
+                      extra_metrics: bool = False,
+                      image_weight_map: Optional[Tensor] = None,
                       ) -> Tuple[TensorTBI, Dict[str, Tensor], Dict[str, Tensor]]:
         tensors = {}
         metrics = {}
         loss_reconstr = 0
 
         if self.image:
-            loss_image_tbi, loss_image, image_rec = self.image.training_step(features, obs['image'])
+            if image_weight_map is not None:
+                # Per-pixel loss weighting (e.g. observation mask): only ConvDecoder
+                # supports it — the weight scales the squared error, it never enters
+                # the regression target.
+                assert isinstance(self.image, ConvDecoder), \
+                    f'image_weight_map requires ConvDecoder, got {type(self.image).__name__}'
+                loss_image_tbi, loss_image, image_rec = self.image.training_step(features, obs['image'], weight=image_weight_map)
+            else:
+                loss_image_tbi, loss_image, image_rec = self.image.training_step(features, obs['image'])
             loss_reconstr += self.image_weight * loss_image_tbi
             metrics.update(loss_image=loss_image.detach().mean())
             tensors.update(loss_image=loss_image.detach(),
@@ -160,19 +169,30 @@ class ConvDecoder(nn.Module):
         y = unflatten_batch(y, bd)
         return y
 
-    def loss(self, output: Tensor, target: Tensor) -> Tensor:
+    def loss(self, output: Tensor, target: Tensor, weight: Optional[Tensor] = None) -> Tensor:
         output, bd = flatten_batch(output, 3)
         target, _ = flatten_batch(target, 3)
-        loss = 0.5 * torch.square(output - target).sum(dim=[-1, -2, -3])  # MSE
+        loss = 0.5 * torch.square(output - target)  # (*,C,H,W)
+        if weight is not None:
+            # Per-pixel weight (*,1,H,W), broadcast over channels. Weighting the error
+            # (not the target) keeps the per-pixel optimum at the true pixel value for
+            # any weight > 0 — the weight only sets how much each pixel's error matters.
+            weight, _ = flatten_batch(weight, 3)
+            loss = loss * weight
+        loss = loss.sum(dim=[-1, -2, -3])  # MSE
         return unflatten_batch(loss, bd)
 
-    def training_step(self, features: TensorTBIF, target: TensorTBCHW) -> Tuple[TensorTBI, TensorTB, TensorTBCHW]:
+    def training_step(self, features: TensorTBIF, target: TensorTBCHW, weight: Optional[Tensor] = None) -> Tuple[TensorTBI, TensorTB, TensorTBCHW]:
         assert len(features.shape) == 4 and len(target.shape) == 5
         I = features.shape[2]
         target = insert_dim(target, 2, I)  # Expand target with iwae_samples dim, because features have it
+        if weight is not None:
+            assert len(weight.shape) == 5 and weight.shape[2] == 1, \
+                f'Expected weight (T,B,1,H,W), got {weight.shape}'
+            weight = insert_dim(weight, 2, I)  # (T,B,I,1,H,W), broadcasts over C
 
         decoded = self.forward(features)
-        loss_tbi = self.loss(decoded, target)
+        loss_tbi = self.loss(decoded, target, weight)
         loss_tb = -logavgexp(-loss_tbi, dim=2)  # TBI => TB
         decoded = decoded.mean(dim=2)  # TBICHW => TBCHW
 

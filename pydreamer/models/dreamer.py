@@ -284,8 +284,20 @@ class WorldModel(nn.Module):
             # being skipped after the fact.
             if getattr(conf, 'masker_frozen', True):
                 self.masker.requires_grad_(False)
+            # Weighted reconstruction: decoder targets the RAW image with the mask as a
+            # per-pixel loss weight, instead of regressing the masked image itself. The
+            # soft mask (fg ≈ 0.75, frame-to-frame jitter) would otherwise be baked into
+            # the regression target — dimming the foreground and putting an irreducible
+            # noise floor under the image loss. As a weight it only steers where the
+            # error matters; the target stays clean and stationary across masker syncs.
+            self.masker_weighted_recon = getattr(conf, 'masker_weighted_recon', True)
+            # Floor keeps background pixels weakly constrained so the decoder converges
+            # to a stable "roughly gray" there instead of unconstrained noise.
+            self.masker_recon_weight_floor = getattr(conf, 'masker_recon_weight_floor', 0.05)
         else:
             self.masker = None
+            self.masker_weighted_recon = False
+            self.masker_recon_weight_floor = 0.0
 
         # Inverse dynamics head (auxiliary representation loss on encoder embedding)
 
@@ -368,9 +380,16 @@ class WorldModel(nn.Module):
         if forward_only:
             return torch.tensor(0.0), features, states, out_state, {}, {}
 
-        # Decoder (supervised on masked obs, consistent with encoder input)
+        # Decoder: with weighted recon the target is the raw obs and the mask enters as
+        # a per-pixel loss weight; otherwise supervise on the masked obs (legacy).
 
-        loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs_enc)
+        if mask is not None and self.masker_weighted_recon:
+            image_weight = mask.detach().clamp(min=self.masker_recon_weight_floor)
+            obs_dec = obs
+        else:
+            image_weight = None
+            obs_dec = obs_enc
+        loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs_dec, image_weight_map=image_weight)
         if mask is not None:
             tensors['image_masked'] = masked_image.detach()
             tensors['mask'] = mask.detach()
@@ -444,8 +463,9 @@ class WorldModel(nn.Module):
             with torch.no_grad():
                 prior_samples = self.core.zdistr(prior).sample().reshape(post_samples.shape)
                 features_prior = self.core.feature_replace_z(features, prior_samples)
-                # Decode from prior
-                _, mets, tens = self.decoder.training_step(features_prior, obs_enc, extra_metrics=True)
+                # Decode from prior (same target/weighting as the posterior loss above,
+                # so logprob_* metrics stay comparable to loss_*)
+                _, mets, tens = self.decoder.training_step(features_prior, obs_dec, extra_metrics=True, image_weight_map=image_weight)
                 metrics_logprob = {k.replace('loss_', 'logprob_'): v for k, v in mets.items() if k.startswith('loss_')}
                 tensors_logprob = {k.replace('loss_', 'logprob_'): v for k, v in tens.items() if k.startswith('loss_')}
                 tensors_pred = {k.replace('_rec', '_pred'): v for k, v in tens.items() if k.endswith('_rec')}
