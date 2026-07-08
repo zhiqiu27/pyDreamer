@@ -147,7 +147,6 @@ def run(conf):
             weight_bg=getattr(conf, 'masker_weight_bg', 1.0),
             weight_inv=getattr(conf, 'masker_weight_inv', 1.0),
             mask_temp=getattr(conf, 'masker_mask_temp', 0.5),
-            mask_dilate=getattr(conf, 'masker_mask_dilate', 3),
         )
 
         optimizer.zero_grad()

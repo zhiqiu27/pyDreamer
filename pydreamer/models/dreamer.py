@@ -294,10 +294,17 @@ class WorldModel(nn.Module):
             # Floor keeps background pixels weakly constrained so the decoder converges
             # to a stable "roughly gray" there instead of unconstrained noise.
             self.masker_recon_weight_floor = getattr(conf, 'masker_recon_weight_floor', 0.05)
+            # Whether the encoder sees the masked image (hard information gate — background
+            # can never reach z) or the raw image (mask only steers the decoder loss; any
+            # background suppression in z would have to emerge indirectly from KL pressure,
+            # which kl_balance biases against). Decoupled from masker_weighted_recon so both
+            # can be ablated independently.
+            self.masker_mask_encoder_input = getattr(conf, 'masker_mask_encoder_input', True)
         else:
             self.masker = None
             self.masker_weighted_recon = False
             self.masker_recon_weight_floor = 0.0
+            self.masker_mask_encoder_input = False
 
         # Inverse dynamics head (auxiliary representation loss on encoder embedding)
 
@@ -358,7 +365,10 @@ class WorldModel(nn.Module):
 
         if self.masker is not None and 'image' in obs:
             masked_image, mask = self.masker(obs['image'])
-            obs_enc = dict(obs, image=masked_image)  # shallow copy, only replaces image
+            if self.masker_mask_encoder_input:
+                obs_enc = dict(obs, image=masked_image)  # shallow copy, only replaces image
+            else:
+                obs_enc = obs  # encoder sees the raw image; mask only used for decoder loss below
         else:
             obs_enc = obs
             mask = None
