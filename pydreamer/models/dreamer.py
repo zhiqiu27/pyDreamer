@@ -300,11 +300,20 @@ class WorldModel(nn.Module):
             # which kl_balance biases against). Decoupled from masker_weighted_recon so both
             # can be ablated independently.
             self.masker_mask_encoder_input = getattr(conf, 'masker_mask_encoder_input', True)
+            # Per-pixel weights sum most of their mass into the (larger) background area
+            # even after the floor, so the raw image loss magnitude shrinks a lot relative
+            # to the unweighted case (background dominates by area despite the low floor
+            # weight) — silently inflating KL's relative share of the total loss. Rescaling
+            # the weight map to mean 1 keeps the overall image loss magnitude comparable to
+            # unweighted, so image_weight/kl_weight don't need retuning, and it self-adjusts
+            # if the foreground area or floor changes (e.g. across a masker refresh).
+            self.masker_recon_weight_normalize = getattr(conf, 'masker_recon_weight_normalize', False)
         else:
             self.masker = None
             self.masker_weighted_recon = False
             self.masker_recon_weight_floor = 0.0
             self.masker_mask_encoder_input = False
+            self.masker_recon_weight_normalize = False
 
         # Inverse dynamics head (auxiliary representation loss on encoder embedding)
 
@@ -395,6 +404,8 @@ class WorldModel(nn.Module):
 
         if mask is not None and self.masker_weighted_recon:
             image_weight = mask.detach().clamp(min=self.masker_recon_weight_floor)
+            if self.masker_recon_weight_normalize:
+                image_weight = image_weight / image_weight.mean().clamp(min=1e-6)
             obs_dec = obs
         else:
             image_weight = None
