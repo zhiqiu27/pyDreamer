@@ -29,6 +29,14 @@ def to_image(x: np.ndarray) -> np.ndarray:
     return x
 
 
+def to_mask(x: np.ndarray) -> np.ndarray:
+    x = x.astype(np.float32)
+    if x.max() > 1.0:
+        x = x / 255.0
+    x = x.transpose(0, 1, 4, 2, 3)  # (T, B, H, W, C) => (T, B, C, H, W)
+    return x
+
+
 def remove_keys(data: dict, keys: list):
     for key in keys:
         if key in data:
@@ -117,6 +125,11 @@ class Preprocessor:
                 batch['image2'] = img_to_onehot(batch['image2'], self.image_categorical)
             else:
                 batch['image2'] = to_image(batch['image2'])
+
+        if 'mask_gt' in batch:
+            # Ground-truth simulator mask (see pydreamer/envs/dmc.py DMC.render_mask):
+            # (T,B,H,W,1) in {0,255} or {0,1} => (T,B,1,H,W) float in [0,1]
+            batch['mask_gt'] = to_mask(batch['mask_gt'])
 
         # map
 

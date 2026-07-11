@@ -83,11 +83,13 @@ def create_env(env_id: str, no_terminal: bool, env_time_limit: int, env_action_r
         cls = PairedDistractingDMC if paired else DistractingDMC
         env = cls(name, action_repeat=env_action_repeat,
                   difficulty=difficulty, dynamic=dynamic,
-                  custom_kwargs=custom_kwargs)
+                  custom_kwargs=custom_kwargs,
+                  gt_mask=getattr(conf, 'use_gt_mask', False))
 
     elif env_id.startswith('DMC-'):
         from .dmc import DMC
-        env = DMC(env_id.split('-', maxsplit=1)[1].lower(), action_repeat=env_action_repeat)
+        env = DMC(env_id.split('-', maxsplit=1)[1].lower(), action_repeat=env_action_repeat,
+                  gt_mask=getattr(conf, 'use_gt_mask', False))
     
     elif env_id.startswith('Embodied-'):
         from .embodied import EmbodiedEnv

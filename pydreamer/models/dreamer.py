@@ -271,6 +271,13 @@ class WorldModel(nn.Module):
         # Observation masker (pre-trained externally, applied before encoder)
 
         self.use_masker = getattr(conf, 'use_masker', False)
+        # Ground-truth ablation: instead of a learned mask, use the simulator's own
+        # segmentation mask (obs['mask_gt'], see pydreamer/envs/dmc.py render_mask).
+        # No network involved, so it's mutually exclusive with the learned masker.
+        self.use_gt_mask = getattr(conf, 'use_gt_mask', False)
+        assert not (self.use_masker and self.use_gt_mask), \
+            'use_masker and use_gt_mask are mutually exclusive mask sources'
+
         if self.use_masker:
             self.masker = ObservationMasker(
                 in_channels=conf.image_channels,
@@ -284,6 +291,10 @@ class WorldModel(nn.Module):
             # being skipped after the fact.
             if getattr(conf, 'masker_frozen', True):
                 self.masker.requires_grad_(False)
+        else:
+            self.masker = None
+
+        if self.use_masker or self.use_gt_mask:
             # Weighted reconstruction: decoder targets the RAW image with the mask as a
             # per-pixel loss weight, instead of regressing the masked image itself. The
             # soft mask (fg ≈ 0.75, frame-to-frame jitter) would otherwise be baked into
@@ -309,7 +320,6 @@ class WorldModel(nn.Module):
             # if the foreground area or floor changes (e.g. across a masker refresh).
             self.masker_recon_weight_normalize = getattr(conf, 'masker_recon_weight_normalize', False)
         else:
-            self.masker = None
             self.masker_weighted_recon = False
             self.masker_recon_weight_floor = 0.0
             self.masker_mask_encoder_input = False
@@ -370,17 +380,27 @@ class WorldModel(nn.Module):
                       do_image_pred=False,
                       forward_only=False
                       ):
-        # Masker: produce masked image for encoder; decoder still targets original obs
+        # Masker: produce masked image for encoder; decoder still targets original obs.
+        # Two mutually exclusive mask sources (see __init__): a learned network, or the
+        # simulator's ground-truth segmentation mask (obs['mask_gt'], stored as a compact
+        # per-pixel mask rather than a redundant pre-masked image; masked_image is derived
+        # here the same way for both sources).
 
+        mask = None
+        masked_image = None
         if self.masker is not None and 'image' in obs:
             masked_image, mask = self.masker(obs['image'])
+        elif self.use_gt_mask and 'mask_gt' in obs and 'image' in obs:
+            mask = obs['mask_gt']
+            masked_image = obs['image'] * mask
+
+        if mask is not None:
             if self.masker_mask_encoder_input:
                 obs_enc = dict(obs, image=masked_image)  # shallow copy, only replaces image
             else:
                 obs_enc = obs  # encoder sees the raw image; mask only used for decoder loss below
         else:
             obs_enc = obs
-            mask = None
 
         # Encoder
 

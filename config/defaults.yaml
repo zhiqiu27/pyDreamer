@@ -101,6 +101,12 @@ defaults:
   masker_recon_weight_normalize: False # rescale weight map to mean 1, so image_weight/kl_weight balance doesn't shift vs. unweighted (default False = don't touch currently-running experiments)
   masker_mask_encoder_input: True # encoder sees masked image (hard info gate); False = encoder sees raw image, mask only weights decoder loss
 
+  # Ground-truth mask ablation: use the simulator's segmentation mask instead of a
+  # learned masker (mutually exclusive with use_masker). DMC/DistractingDMC family
+  # only. Reuses masker_weighted_recon / masker_recon_weight_floor /
+  # masker_mask_encoder_input / masker_recon_weight_normalize above.
+  use_gt_mask: False
+
   # Periodic on-policy masker refresh (co-evolve the frozen masker with the policy during main training)
   masker_refresh: False                 # enable periodic refresh; requires use_masker=True
   masker_refresh_every_ckpt: 2          # trigger a refresh every N saved checkpoints
