@@ -7,7 +7,8 @@ import numpy as np
 
 class DMC(gym.Env):
 
-    def __init__(self, name, action_repeat=1, size=(64, 64), camera=None, gt_mask=False):
+    def __init__(self, name, action_repeat=1, size=(64, 64), camera=None, gt_mask=False,
+                 gt_mask_supersample=1):
         # os.environ['MUJOCO_GL'] = 'egl'
         domain, task = name.split('_', 1)
         if domain == 'cup':  # Only domain with multiple words.
@@ -24,6 +25,7 @@ class DMC(gym.Env):
         self._action_repeat = action_repeat
         self._size = size
         self._gt_mask = gt_mask
+        self._gt_supersample = int(gt_mask_supersample) if gt_mask else 1
         if camera is None:
             camera = dict(
                 quadruped_walk=2,
@@ -55,8 +57,12 @@ class DMC(gym.Env):
         spaces['image'] = gym.spaces.Box(
             0, 255, self._size + (3,), dtype=np.uint8)
         if self._gt_mask:
+            # Binary {0,1} when supersample==1; soft 0..255 (anti-aliased edges) otherwise.
             spaces['mask_gt'] = gym.spaces.Box(
-                0, 1, self._size + (1,), dtype=np.uint8)
+                0, 255, self._size + (1,), dtype=np.uint8)
+            if self._gt_supersample > 1:
+                spaces['image_masked_gt'] = gym.spaces.Box(
+                    0, 255, self._size + (3,), dtype=np.uint8)
         return gym.spaces.Dict(spaces)
 
     @property
@@ -88,9 +94,12 @@ class DMC(gym.Env):
     def observation(self, time_step):
         obs = dict(time_step.observation)
         obs = {k: v for k, v in obs.items() if k not in self._ignored_keys}
-        obs['image'] = self.render()
-        if self._gt_mask:
-            obs['mask_gt'] = self.render_mask()
+        if self._gt_mask and self._gt_supersample > 1:
+            obs.update(self._render_gt_supersampled())
+        else:
+            obs['image'] = self.render()
+            if self._gt_mask:
+                obs['mask_gt'] = self.render_mask()
         return obs
 
     def render(self, *args, **kwargs):
@@ -106,13 +115,41 @@ class DMC(gym.Env):
         seg = self._env.physics.render(*self._size, camera_id=self._camera, segmentation=True)  # type: ignore
         return (seg[:, :, 0] != -1).astype(np.uint8)[:, :, None]  # (H,W,1)
 
+    def _render_gt_supersampled(self):
+        """Anti-aliased GT masking: render image and segmentation at gt_mask_supersample
+        times the target resolution, apply the (there still binary) mask at high res,
+        then area-average everything down to target size. Edge pixels of the masked
+        image become a smooth foreground-to-background blend instead of the jagged
+        all-or-nothing of a native low-res binary mask, and multiplying BEFORE
+        downsampling keeps distractor background colors from bleeding into them.
+        The mask itself downsamples to soft [0,255] (fractional coverage at edges).
+
+        The masked image blends to mid-gray 127.5, not black: the model masks in
+        normalized [-0.5,0.5] space where background=0 decodes to mid-gray, and
+        image_masked_gt must be a drop-in for that product."""
+        k = self._gt_supersample
+        h, w = self._size
+        image_hr = self._env.physics.render(h * k, w * k, camera_id=self._camera).astype(np.float32)  # type: ignore
+        seg = self._env.physics.render(h * k, w * k, camera_id=self._camera, segmentation=True)  # type: ignore
+        mask_hr = (seg[:, :, :1] != -1).astype(np.float32)  # (H*k, W*k, 1)
+        masked_hr = image_hr * mask_hr + 127.5 * (1.0 - mask_hr)
+
+        def down(x):  # (H*k, W*k, C) -> (H, W, C) area average
+            return x.reshape(h, k, w, k, x.shape[-1]).mean(axis=(1, 3))
+
+        return {
+            'image': np.clip(down(image_hr).round(), 0, 255).astype(np.uint8),
+            'image_masked_gt': np.clip(down(masked_hr).round(), 0, 255).astype(np.uint8),
+            'mask_gt': np.clip(down(mask_hr * 255.0).round(), 0, 255).astype(np.uint8),
+        }
+
 
 class DistractingDMC(DMC):
 
     def __init__(self, name, action_repeat=1, size=(64, 64),
                  difficulty='easy', dynamic=False,
                  background_dataset_path='/home/csy24/DAVIS/JPEGImages/480p/',
-                 custom_kwargs=None, gt_mask=False):
+                 custom_kwargs=None, gt_mask=False, gt_mask_supersample=1):
         from distracting_control import suite as distracting_suite
         from distracting_control import suite_utils
         domain, task = name.split('_', 1)
@@ -159,6 +196,7 @@ class DistractingDMC(DMC):
         self._action_repeat = action_repeat
         self._size = size
         self._gt_mask = gt_mask
+        self._gt_supersample = int(gt_mask_supersample) if gt_mask else 1
         self._camera = dict(
             quadruped_walk=2,
             quadruped_run=2,
@@ -195,9 +233,10 @@ class PairedDistractingDMC(DistractingDMC):
     def __init__(self, name, action_repeat=1, size=(64, 64),
                  difficulty='easy', dynamic=False,
                  background_dataset_path='/home/csy24/DAVIS/JPEGImages/480p/',
-                 custom_kwargs=None, gt_mask=False):
+                 custom_kwargs=None, gt_mask=False, gt_mask_supersample=1):
         super().__init__(name, action_repeat, size, difficulty, dynamic,
-                         background_dataset_path, custom_kwargs, gt_mask)
+                         background_dataset_path, custom_kwargs, gt_mask,
+                         gt_mask_supersample)
         # The background wrapper owns the video pool and the apply/upload logic.
         self._bg = self._find_bg_wrapper(self._env)
         assert self._bg is not None and self._bg._video_paths, \

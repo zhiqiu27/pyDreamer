@@ -97,15 +97,16 @@ defaults:
   masker_weight_inv: 1.0          # inverse dynamics loss weight
   masker_mask_temp: 0.25           # temperature for exp(-bg_diff/temp) foreground target (smaller=sharper)
   masker_weighted_recon: True     # decoder targets RAW image, mask = per-pixel loss weight (False = legacy: regress the masked image)
-  masker_recon_weight_floor: 0.05 # min per-pixel weight, keeps background weakly constrained (avoids unconstrained noise there)
+  masker_recon_weight_floor: 0 # min per-pixel weight, keeps background weakly constrained (avoids unconstrained noise there)
   masker_recon_weight_normalize: False # rescale weight map to mean 1, so image_weight/kl_weight balance doesn't shift vs. unweighted (default False = don't touch currently-running experiments)
-  masker_mask_encoder_input: True # encoder sees masked image (hard info gate); False = encoder sees raw image, mask only weights decoder loss
+  masker_mask_encoder_input: True # encoder sees masked image (hard info gate); False = encoder sees raw image, mask only affects decoder loss (as weight if masker_weighted_recon, else as masked regression target)
 
   # Ground-truth mask ablation: use the simulator's segmentation mask instead of a
   # learned masker (mutually exclusive with use_masker). DMC/DistractingDMC family
   # only. Reuses masker_weighted_recon / masker_recon_weight_floor /
   # masker_mask_encoder_input / masker_recon_weight_normalize above.
   use_gt_mask: False
+  gt_mask_supersample: 4  # >1: render image+seg at Nx res, premultiply, area-downsample -> anti-aliased masked image (image_masked_gt) + soft mask_gt; 1 = legacy native-res binary mask
 
   # Periodic on-policy masker refresh (co-evolve the frozen masker with the policy during main training)
   masker_refresh: False                 # enable periodic refresh; requires use_masker=True

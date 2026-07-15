@@ -392,7 +392,14 @@ class WorldModel(nn.Module):
             masked_image, mask = self.masker(obs['image'])
         elif self.use_gt_mask and 'mask_gt' in obs and 'image' in obs:
             mask = obs['mask_gt']
-            masked_image = obs['image'] * mask
+            if 'image_masked_gt' in obs:
+                # Env premultiplied at supersampled resolution before downsampling
+                # (gt_mask_supersample > 1): anti-aliased edges, no background bleed.
+                # Strictly better than the low-res product below, which with a soft
+                # mask would mix background color into edge pixels.
+                masked_image = obs['image_masked_gt']
+            else:
+                masked_image = obs['image'] * mask
 
         if mask is not None:
             if self.masker_mask_encoder_input:
@@ -420,7 +427,8 @@ class WorldModel(nn.Module):
             return torch.tensor(0.0), features, states, out_state, {}, {}
 
         # Decoder: with weighted recon the target is the raw obs and the mask enters as
-        # a per-pixel loss weight; otherwise supervise on the masked obs (legacy).
+        # a per-pixel loss weight; otherwise supervise on the masked obs (legacy),
+        # regardless of whether the encoder saw the masked or raw image.
 
         if mask is not None and self.masker_weighted_recon:
             image_weight = mask.detach().clamp(min=self.masker_recon_weight_floor)
@@ -429,7 +437,7 @@ class WorldModel(nn.Module):
             obs_dec = obs
         else:
             image_weight = None
-            obs_dec = obs_enc
+            obs_dec = dict(obs, image=masked_image) if mask is not None else obs
         loss_reconstr, metrics, tensors = self.decoder.training_step(features, obs_dec, image_weight_map=image_weight)
         if mask is not None:
             tensors['image_masked'] = masked_image.detach()

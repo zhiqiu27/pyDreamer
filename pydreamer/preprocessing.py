@@ -128,8 +128,14 @@ class Preprocessor:
 
         if 'mask_gt' in batch:
             # Ground-truth simulator mask (see pydreamer/envs/dmc.py DMC.render_mask):
-            # (T,B,H,W,1) in {0,255} or {0,1} => (T,B,1,H,W) float in [0,1]
+            # binary {0,1} or soft 0..255 (gt_mask_supersample>1, anti-aliased edges)
+            # (T,B,H,W,1) => (T,B,1,H,W) float in [0,1]
             batch['mask_gt'] = to_mask(batch['mask_gt'])
+
+        if 'image_masked_gt' in batch:
+            # Premultiplied GT-masked image, rendered supersampled then downsampled
+            # (see DMC._render_gt_supersampled); same normalization as 'image'
+            batch['image_masked_gt'] = to_image(batch['image_masked_gt'])
 
         # map
 
