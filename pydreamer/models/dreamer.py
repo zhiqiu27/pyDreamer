@@ -319,11 +319,16 @@ class WorldModel(nn.Module):
             # unweighted, so image_weight/kl_weight don't need retuning, and it self-adjusts
             # if the foreground area or floor changes (e.g. across a masker refresh).
             self.masker_recon_weight_normalize = getattr(conf, 'masker_recon_weight_normalize', False)
+            # Split recon: agent and background each contribute an area-normalized image
+            # loss term (weight 1 each), so the small agent region's share of the loss
+            # no longer scales with its pixel area. Overrides floor/normalize.
+            self.masker_split_recon = getattr(conf, 'masker_split_recon', False)
         else:
             self.masker_weighted_recon = False
             self.masker_recon_weight_floor = 0.0
             self.masker_mask_encoder_input = False
             self.masker_recon_weight_normalize = False
+            self.masker_split_recon = False
 
         # Inverse dynamics head (auxiliary representation loss on encoder embedding)
 
@@ -430,7 +435,19 @@ class WorldModel(nn.Module):
         # a per-pixel loss weight; otherwise supervise on the masked obs (legacy),
         # regardless of whether the encoder saw the masked or raw image.
 
-        if mask is not None and self.masker_weighted_recon:
+        if mask is not None and self.masker_split_recon:
+            # Split recon via per-pixel weight: weight = m/mean(m) + (1-m)/mean(1-m),
+            # normalized per frame. The image loss then decomposes into
+            # (mean per-pixel error inside the mask)*H*W + (same, outside) — agent and
+            # background contribute equally regardless of the agent's tiny pixel area.
+            # The mean-clamp caps the amplification of a degenerate/empty region (e.g.
+            # agent out of view) at 1000x; floor/normalize don't apply here since the
+            # bg term already constrains the background.
+            m = mask.detach()
+            image_weight = (m / m.mean(dim=[-1, -2], keepdim=True).clamp(min=1e-3)
+                            + (1 - m) / (1 - m).mean(dim=[-1, -2], keepdim=True).clamp(min=1e-3))
+            obs_dec = obs if self.masker_weighted_recon else dict(obs, image=masked_image)
+        elif mask is not None and self.masker_weighted_recon:
             image_weight = mask.detach().clamp(min=self.masker_recon_weight_floor)
             if self.masker_recon_weight_normalize:
                 image_weight = image_weight / image_weight.mean().clamp(min=1e-6)
@@ -442,6 +459,14 @@ class WorldModel(nn.Module):
         if mask is not None:
             tensors['image_masked'] = masked_image.detach()
             tensors['mask'] = mask.detach()
+            if 'image_rec' in tensors:
+                with torch.no_grad():
+                    # Per-region diagnostics: mean squared error per pixel (summed over
+                    # channels) inside vs outside the mask, against the decoder's own
+                    # target — directly comparable, independent of the loss weighting.
+                    err = 0.5 * torch.square(tensors['image_rec'] - obs_dec['image'])  # (T,B,C,H,W)
+                    metrics['loss_image_agent'] = (err * mask).sum() / mask.sum().clamp(min=1e-6)
+                    metrics['loss_image_bg'] = (err * (1 - mask)).sum() / (1 - mask).sum().clamp(min=1e-6)
 
         # KL loss
 

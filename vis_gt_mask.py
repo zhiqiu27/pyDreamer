@@ -77,8 +77,14 @@ def main():
     if args.plain:
         env = dmc.DMC(args.task, gt_mask=True, gt_mask_supersample=args.supersample)
     else:
+        custom_kwargs = None
+        if args.difficulty == 'custom':
+            # Mirrors config/distract.yaml (background only, no camera/color distraction)
+            custom_kwargs = dict(scale=0.2, num_videos=None, video_alpha=1.0,
+                                 ground_alpha=1.0, background=True, camera=False, color=False)
         env = dmc.DistractingDMC(args.task, difficulty=args.difficulty, dynamic=args.dynamic,
                                  background_dataset_path=args.davis,
+                                 custom_kwargs=custom_kwargs,
                                  gt_mask=True, gt_mask_supersample=args.supersample)
 
     spec = env._env.action_spec()

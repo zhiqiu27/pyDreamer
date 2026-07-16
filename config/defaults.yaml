@@ -100,6 +100,7 @@ defaults:
   masker_recon_weight_floor: 0 # min per-pixel weight, keeps background weakly constrained (avoids unconstrained noise there)
   masker_recon_weight_normalize: False # rescale weight map to mean 1, so image_weight/kl_weight balance doesn't shift vs. unweighted (default False = don't touch currently-running experiments)
   masker_mask_encoder_input: True # encoder sees masked image (hard info gate); False = encoder sees raw image, mask only affects decoder loss (as weight if masker_weighted_recon, else as masked regression target)
+  masker_split_recon: False       # split image loss into agent + bg terms, each normalized by its own pixel area (weight 1 each) — so the tiny agent region isn't drowned by background area; overrides floor/normalize
 
   # Ground-truth mask ablation: use the simulator's segmentation mask instead of a
   # learned masker (mutually exclusive with use_masker). DMC/DistractingDMC family
